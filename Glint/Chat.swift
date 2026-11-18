@@ -263,11 +263,20 @@ final class ChatClient {
         var modes: [String] = []
         if let slow = room["slow"].flatMap({ Int($0) }), slow > 0 { modes.append("Modo lento: \(slow) s") }
         if let followers = room["followers-only"].flatMap({ Int($0) }), followers >= 0 {
-            modes.append(followers == 0 ? "Solo seguidores" : "Solo seguidores de hace \(followers) min")
+            modes.append(followers == 0 ? "Solo seguidores" : "Solo seguidores desde hace \(duration(minutes: followers))")
         }
         if room["subs-only"] == "1" { modes.append("Solo suscriptores") }
         if room["emote-only"] == "1" { modes.append("Solo emotes") }
         return modes
+    }
+
+    /// 129600 → "3 meses", 1440 → "1 día", 90 → "2 h".
+    nonisolated static func duration(minutes: Int) -> String {
+        let (months, days, hours) = (minutes / 43_200, minutes / 1_440, (minutes + 30) / 60)
+        if months > 0 { return months == 1 ? "1 mes" : "\(months) meses" }
+        if days > 0 { return days == 1 ? "1 día" : "\(days) días" }
+        if minutes >= 60 { return "\(hours) h" }
+        return "\(minutes) min"
     }
 
     nonisolated static func translate(notice id: String, _ text: String) -> String {
