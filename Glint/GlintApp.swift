@@ -8,6 +8,7 @@ struct GlintApp: App {
     @State private var library = Library()
     @State private var playback = Playback()
     @State private var router = Router()
+    @State private var account = Account.shared
 
     init() {
         // Sonido con el iPhone en silencio, audio en segundo plano y Picture in Picture
@@ -22,6 +23,7 @@ struct GlintApp: App {
                 .environment(library)
                 .environment(playback)
                 .environment(router)
+                .environment(account)
                 .preferredColorScheme(.dark)
                 .tint(.glint)
         }
@@ -38,6 +40,7 @@ struct RootView: View {
     @Environment(Router.self) private var router
     @Environment(Playback.self) private var playback
     @Environment(Library.self) private var library
+    @Environment(Account.self) private var account
 
     var body: some View {
         @Bindable var router = router
@@ -76,5 +79,15 @@ struct RootView: View {
             playback.play(.live(login))
         }
         .task { await Demo.run(router: router, playback: playback, library: library) }
+        .sheet(isPresented: $router.showAccount) { AccountView(startAtLogin: router.accountAtLogin) }
+        // Con sesión: perfil al día y los seguidos de tu cuenta en Inicio
+        .task(id: account.user?.id) {
+            await account.refresh()
+            if let token = account.token, let follows = try? await Twitch.followedChannels(token: token) {
+                library.importFollows(follows)
+            }
+        }
+        // El chat del directo abierto vuelve a entrar con la nueva identidad
+        .onChange(of: account.user?.id) { playback.chat.reconnect() }
     }
 }

@@ -79,6 +79,11 @@ enum Demo {
                 // Con el dedo en otro punto, el tramo ámbar de la barra queda a la vista
                 if screen == "mutedbar" { playback.engine.demoScrub = playback.engine.duration * 0.6 }
             }
+        case "account":
+            router.showAccount = true
+        case "login":
+            router.accountAtLogin = true
+            router.showAccount = true
         case "history":
             router.home.append(.history)
         case "channel":

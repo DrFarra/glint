@@ -24,7 +24,9 @@ struct PlayerHost: View {
                     .statusBarHidden(layout.landscape && progress == 0)
                     .persistentSystemOverlays(layout.landscape && progress == 0 ? .hidden : .automatic)
             }
-            .ignoresSafeArea(.keyboard)
+            // A pantalla completa el teclado empuja el chat hacia arriba para ver lo que escribes;
+            // en mini, la tarjeta no se mueve
+            .ignoresSafeArea(playback.minimized || drag != nil ? .keyboard : [])
             .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }

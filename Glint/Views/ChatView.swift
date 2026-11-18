@@ -11,12 +11,23 @@ struct ChatView: View {
     @State private var position = ScrollPosition(edge: .top)
     @State private var phase: ScrollPhase = .idle
     @State private var atNewest = true
+    @State private var replyTo: ChatMessage?
 
     var body: some View {
+        VStack(spacing: 0) {
+            list
+            // Solo en directo se puede escribir; en un VOD el chat es la repetición
+            if chat.channel != nil {
+                ChatComposer(chat: chat, replyTo: $replyTo)
+            }
+        }
+    }
+
+    private var list: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 6) {
                 ForEach(chat.messages.reversed()) { message in
-                    ChatRow(message: message)
+                    ChatRow(message: message, onReply: chat.authenticated ? { replyTo = $0 } : nil)
                         .scaleEffect(x: 1, y: -1)
                 }
             }
@@ -85,6 +96,7 @@ struct ChatView: View {
 
 struct ChatRow: View {
     let message: ChatMessage
+    var onReply: ((ChatMessage) -> Void)?
     @Environment(\.openURL) private var openURL
 
     private static let linkColor = Color(red: 0.45, green: 0.72, blue: 1)
@@ -108,6 +120,12 @@ struct ChatRow: View {
                 if let url = message.links.first { openURL(url) }
             }
             .contextMenu {
+                if let onReply, message.ircID != nil, !message.name.isEmpty {
+                    Button("Responder", systemImage: "arrowshape.turn.up.left") { onReply(message) }
+                }
+                if !message.parts.isEmpty {
+                    Button("Copiar mensaje", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.plainText }
+                }
                 ForEach(message.links, id: \.self) { url in
                     Button("Abrir \(url.host() ?? "enlace")", systemImage: "safari") { openURL(url) }
                     Button("Copiar enlace", systemImage: "doc.on.doc") { UIPasteboard.general.url = url }
@@ -201,6 +219,7 @@ extension ChatMessage.Event.Style {
         case .announcement: "megaphone.fill"
         case .bits: "diamond.fill"
         case .other: "sparkles"
+        case .notice: "info.circle.fill"
         }
     }
 
@@ -212,6 +231,7 @@ extension ChatMessage.Event.Style {
         case .announcement: Color(red: 0.45, green: 0.68, blue: 1)
         case .bits: Color(red: 0.72, green: 0.52, blue: 1)
         case .other: Color(red: 1, green: 0.85, blue: 0.35)
+        case .notice: Color(white: 0.6)
         }
     }
 }

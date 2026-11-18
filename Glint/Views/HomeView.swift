@@ -39,6 +39,9 @@ struct HomeView: View {
             .padding(.bottom, 24)
         }
         .navigationTitle("Inicio")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) { AccountButton() }
+        }
         .refreshable {
             await loadStreams()
             await loadFollowed()

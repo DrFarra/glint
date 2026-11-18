@@ -33,6 +33,8 @@ shot home 12
 shot browse 8
 shot search 8
 shot history 8
+shot account 8
+shot login 16
 shot channel 10
 shot player 18
 shot chatstyles 16

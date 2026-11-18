@@ -174,14 +174,23 @@ struct WatchProgress: View {
     }
 }
 
+/// Sin sesión, seguir es local (para Inicio y los avisos). Con sesión, se sigue en la
+/// cuenta de Twitch desde su página (Twitch no deja hacerlo a apps de terceros) y al
+/// volver se comprueba en tu cuenta.
 struct FollowButton: View {
     let channel: ChannelRef
     var compact = false
     @Environment(Library.self) private var library
+    @Environment(Account.self) private var account
+    @State private var showTwitch = false
 
     var body: some View {
         let following = library.isFollowing(channel.login)
         Button {
+            if account.isLoggedIn {
+                showTwitch = true
+                return
+            }
             withAnimation(.snappy) { library.toggleFollow(channel) }
             // Al seguir el primer canal se piden permisos para avisar cuando empiece directo
             if library.isFollowing(channel.login) { LiveAlerts.requestPermission() }
@@ -198,6 +207,19 @@ struct FollowButton: View {
         }
         .buttonStyle(PressStyle())
         .sensoryFeedback(.selection, trigger: following)
+        .sheet(isPresented: $showTwitch, onDismiss: { Task { await sync() } }) {
+            TwitchWebSheet(title: channel.displayName, url: URL(string: "https://www.twitch.tv/\(channel.login)")!,
+                           hint: following ? "Para dejar de seguir, toca el corazón junto al nombre del canal."
+                                           : "Toca «Seguir» junto al nombre del canal y luego «Listo».")
+        }
+        .task(id: account.user?.id) { await sync() }
+    }
+
+    /// Con sesión, lo que manda es tu cuenta de Twitch.
+    private func sync() async {
+        guard let token = account.token, let follows = await Twitch.isFollowing(channel.login, token: token) else { return }
+        if follows, !library.isFollowing(channel.login) { LiveAlerts.requestPermission() }
+        withAnimation(.snappy) { library.setFollow(channel, follows) }
     }
 }
 

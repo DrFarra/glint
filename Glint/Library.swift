@@ -45,6 +45,16 @@ final class Library {
         }
     }
 
+    func setFollow(_ channel: ChannelRef, _ follow: Bool) {
+        if follow != isFollowing(channel.login) { toggleFollow(channel) }
+    }
+
+    /// Añade los seguidos de la cuenta de Twitch que aún no estén (no quita ninguno).
+    func importFollows(_ channels: [ChannelRef]) {
+        let new = channels.filter { !isFollowing($0.login) }
+        if !new.isEmpty { follows += new }
+    }
+
     func addRecent(_ channel: ChannelRef) {
         recents.removeAll { $0.login == channel.login }
         recents.insert(channel, at: 0)
@@ -88,6 +98,9 @@ final class Router {
     var home: [Route] = []
     var browse: [Route] = []
     var search: [Route] = []
+    var showAccount = false
+    /// Solo para las capturas: abrir la cuenta directamente en la página de inicio de sesión.
+    var accountAtLogin = false
 
     func open(_ route: Route) {
         switch tab {

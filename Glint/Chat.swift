@@ -13,7 +13,7 @@ struct ChatMessage: Identifiable {
 
     /// Avisos de Twitch: suscripciones, regalos, raids, anuncios y bits.
     struct Event {
-        enum Style { case sub, gift, raid, announcement, bits, other }
+        enum Style { case sub, gift, raid, announcement, bits, other, notice }
         let style: Style
         let text: String
     }
@@ -33,6 +33,18 @@ struct ChatMessage: Identifiable {
     var kind: Kind = .normal
     /// "Nombre: mensaje" al que responde.
     var reply: String?
+    /// Id del mensaje en Twitch (para responderlo o borrarlo) y usuario que lo escribió.
+    var ircID: String?
+    var login = ""
+
+    var plainText: String {
+        parts.map { part in
+            switch part {
+            case .text(let s), .mention(let s), .link(let s, _): s
+            case .emote(_, let name): name
+            }
+        }.joined()
+    }
 
     var links: [URL] {
         parts.compactMap { part in
@@ -51,8 +63,9 @@ struct ChatMessage: Identifiable {
 
 private let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 
-/// Chat de solo lectura: IRC de Twitch como usuario anónimo (justinfan), que
-/// no necesita cuenta. En un VOD reproduce el chat original al ritmo del vídeo.
+/// Chat por IRC de Twitch: con la sesión del usuario si la hay (y entonces se puede
+/// escribir), si no como anónimo (justinfan). En un VOD reproduce el chat original
+/// al ritmo del vídeo.
 ///
 /// Para que corra suave: cada mensaje espera a que sus emotes estén descargados
 /// (así nunca se ve el nombre del emote y luego la imagen), y los mensajes salen a
@@ -63,6 +76,19 @@ final class ChatClient {
     private(set) var pendingCount = 0
     /// Mientras el usuario lee mensajes antiguos, los nuevos esperan aparte.
     var paused = false { didSet { if !paused, oldValue { releaseHeld() } } }
+    /// Canal del directo (nil en un VOD): solo ahí se puede escribir.
+    private(set) var channel: String?
+    /// Conectado con la cuenta del usuario: se puede escribir.
+    private(set) var authenticated = false
+    /// Modo lento, solo seguidores… en palabras.
+    private(set) var roomModes: [String] = []
+
+    @ObservationIgnored private var pendingSends: [(text: String, reply: ChatMessage?, sent: Date)] = []
+    @ObservationIgnored private var userColor: Substring?
+    @ObservationIgnored private var userName: String?
+    @ObservationIgnored private var room: [String: String] = [:]
+    /// Twitch rechazó el token en el chat: se sigue como anónimo hasta volver a iniciar sesión.
+    @ObservationIgnored private var authFailed = false
 
     @ObservationIgnored private var socket: URLSessionWebSocketTask?
     @ObservationIgnored private var loop: Task<Void, Never>?
@@ -99,12 +125,164 @@ final class ChatClient {
 
     func connect(_ channel: String) {
         disconnect()
+        self.channel = channel.lowercased()
         startPump()
+        openSocket()
+    }
+
+    /// Tras iniciar o cerrar sesión: vuelve a entrar al chat con la nueva identidad.
+    func reconnect() {
+        guard channel != nil else { return }
+        authFailed = false
+        openSocket()
+    }
+
+    private func openSocket() {
+        guard let channel else { return }
+        loop?.cancel()
+        socket?.cancel(with: .goingAway, reason: nil)
+        pendingSends = []
         loop = Task { [weak self] in
             while !Task.isCancelled {
-                await self?.run(channel.lowercased())
+                await self?.run(channel)
                 try? await Task.sleep(for: .seconds(3))
             }
+        }
+    }
+
+    /// Emotes de 7TV, BTTV y FFZ del canal, por nombre.
+    var channelEmotes: [(name: String, url: String)] {
+        extraEmotes.sorted { $0.key.lowercased() < $1.key.lowercased() }.map { (name: $0.key, url: $0.value) }
+    }
+
+    // MARK: - Escribir
+
+    /// Envía un mensaje (o una respuesta). Se muestra cuando Twitch lo confirma.
+    @discardableResult
+    func send(_ raw: String, replyingTo parent: ChatMessage? = nil) -> Bool {
+        let text = raw.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, let socket, let channel, authenticated else { return false }
+        var body = text
+        if text.hasPrefix("/me ") {
+            body = "\u{1}ACTION \(text.dropFirst(4))\u{1}"
+        } else if text.hasPrefix("/") {
+            notice("Los comandos de Twitch no funcionan desde la app (salvo /me).")
+            return false
+        }
+        let tags = parent?.ircID.map { "@reply-parent-msg-id=\($0) " } ?? ""
+        pendingSends.append((text: text, reply: parent, sent: .now))
+        paused = false
+        Task { try? await socket.send(.string("\(tags)PRIVMSG #\(channel) :\(body)")) }
+        return true
+    }
+
+    /// Twitch no devuelve tus propios mensajes: al confirmarlos (USERSTATE con id) se pintan aquí.
+    private func echo(_ pending: (text: String, reply: ChatMessage?, sent: Date), id: String) {
+        let account = Account.shared
+        let login = account.user?.login ?? ""
+        var text = pending.text
+        let isAction = text.hasPrefix("/me ")
+        if isAction { text = String(text.dropFirst(4)) }
+        var parts: [ChatMessage.Part] = []
+        var run = ""
+        for (i, word) in text.split(separator: " ", omittingEmptySubsequences: false).enumerated() {
+            let separator = i == 0 ? "" : " "
+            if let emoteID = account.emoteIDs[String(word)] {
+                run += separator
+                if !run.isEmpty { parts.append(.text(run)) }
+                run = ""
+                parts.append(.emote(url: Self.twitchEmoteURL(emoteID), name: String(word)))
+            } else {
+                run += separator + word
+            }
+        }
+        if !run.isEmpty { parts.append(.text(run)) }
+        let name = userName.flatMap { $0.isEmpty ? nil : $0 } ?? account.user?.displayName ?? login
+        var message = ChatMessage(name: name, color: Self.color(userColor, name: login),
+                                  parts: Self.annotate(parts), isAction: isAction)
+        message.ircID = id
+        message.login = login
+        if let reply = pending.reply { message.reply = "\(reply.name): \(reply.plainText)" }
+        receive(message)
+    }
+
+    /// Aviso de Twitch o de la app dentro del chat.
+    private func notice(_ text: String) {
+        receive(ChatMessage(name: "", color: .secondary, parts: [], isAction: false,
+                            kind: .event(.init(style: .notice, text: text))))
+    }
+
+    /// Líneas IRC que no son mensajes: confirmaciones, avisos, modos del chat y borrados.
+    private func control(_ line: String) {
+        let (tags, rest) = Self.splitTags(line)
+        let trailing = rest.range(of: " :").map { String(rest[$0.upperBound...]) } ?? ""
+        // Lo que se envió hace más de 10 s sin respuesta se da por perdido
+        pendingSends.removeAll { $0.sent.timeIntervalSinceNow < -10 }
+        if rest.contains(" USERSTATE #") {
+            userColor = tags["color"]
+            userName = tags["display-name"].map(Self.unescape)
+            if let id = tags["id"], !pendingSends.isEmpty {
+                echo(pendingSends.removeFirst(), id: String(id))
+            }
+        } else if rest.contains(" NOTICE ") {
+            let id = tags["msg-id"].map(String.init) ?? ""
+            if trailing.contains("Login authentication failed") || trailing.contains("Improperly formatted auth") {
+                authFailed = true
+                authenticated = false
+                notice("Twitch no aceptó tu sesión en el chat. Cierra sesión y vuelve a entrar.")
+                return
+            }
+            if id.hasPrefix("msg_"), !pendingSends.isEmpty { pendingSends.removeFirst() }
+            if !trailing.isEmpty { notice(Self.translate(notice: id, trailing)) }
+        } else if rest.contains(" ROOMSTATE #") {
+            for key in ["emote-only", "followers-only", "slow", "subs-only"] {
+                if let value = tags[Substring(key)] { room[key] = String(value) }
+            }
+            roomModes = Self.describe(room)
+        } else if rest.contains(" CLEARMSG #"), let target = tags["target-msg-id"].map(String.init) {
+            remove { $0.ircID == target }
+        } else if rest.contains(" CLEARCHAT #") {
+            if trailing.isEmpty {
+                remove { _ in true }
+                notice("Un moderador ha vaciado el chat.")
+            } else {
+                remove { $0.login == trailing }
+            }
+        }
+    }
+
+    private func remove(where match: (ChatMessage) -> Bool) {
+        messages.removeAll(where: match)
+        held.removeAll(where: match)
+        ready.removeAll(where: match)
+        staged.removeAll { match($0.message) }
+        pendingCount = held.count
+    }
+
+    nonisolated static func describe(_ room: [String: String]) -> [String] {
+        var modes: [String] = []
+        if let slow = room["slow"].flatMap({ Int($0) }), slow > 0 { modes.append("Modo lento: \(slow) s") }
+        if let followers = room["followers-only"].flatMap({ Int($0) }), followers >= 0 {
+            modes.append(followers == 0 ? "Solo seguidores" : "Solo seguidores de hace \(followers) min")
+        }
+        if room["subs-only"] == "1" { modes.append("Solo suscriptores") }
+        if room["emote-only"] == "1" { modes.append("Solo emotes") }
+        return modes
+    }
+
+    nonisolated static func translate(notice id: String, _ text: String) -> String {
+        switch id {
+        case "msg_slowmode": "El chat está en modo lento: espera un poco para volver a escribir."
+        case "msg_followersonly", "msg_followersonly_zero", "msg_followersonly_followed":
+            "Solo pueden escribir los seguidores del canal."
+        case "msg_subsonly": "Solo pueden escribir los suscriptores."
+        case "msg_emoteonly": "El chat está en modo solo emotes."
+        case "msg_duplicate": "No puedes enviar el mismo mensaje dos veces seguidas."
+        case "msg_ratelimit": "Estás escribiendo demasiado rápido."
+        case "msg_banned": "Tienes prohibido escribir en este chat."
+        case "msg_verified_email": "Tienes que verificar tu email en Twitch para escribir aquí."
+        case "msg_requires_verified_phone_number": "Este canal pide un teléfono verificado en tu cuenta de Twitch."
+        default: text
         }
     }
 
@@ -194,14 +372,26 @@ final class ChatClient {
         emotesLoaded = false
         pendingCount = 0
         paused = false
+        channel = nil
+        authenticated = false
+        roomModes = []
+        room = [:]
+        pendingSends = []
     }
 
     private func run(_ channel: String) async {
         let ws = URLSession.shared.webSocketTask(with: URL(string: "wss://irc-ws.chat.twitch.tv:443")!)
         socket = ws
         ws.resume()
-        for line in ["CAP REQ :twitch.tv/tags twitch.tv/commands", "PASS SCHMOOPIIE",
-                     "NICK justinfan\(Int.random(in: 10_000...99_999))", "JOIN #\(channel)"] {
+        let account = Account.shared
+        var identity = ["PASS SCHMOOPIIE", "NICK justinfan\(Int.random(in: 10_000...99_999))"]
+        if !authFailed, let token = account.token, let login = account.user?.login {
+            identity = ["PASS oauth:\(token)", "NICK \(login)"]
+        }
+        authenticated = identity[0] != "PASS SCHMOOPIIE"
+        room = [:]
+        roomModes = []
+        for line in ["CAP REQ :twitch.tv/tags twitch.tv/commands"] + identity + ["JOIN #\(channel)"] {
             try? await ws.send(.string(line))
         }
         while !Task.isCancelled {
@@ -212,6 +402,8 @@ final class ChatClient {
                     try? await ws.send(.string("PONG :tmi.twitch.tv"))
                 } else if let parsed = Self.parse(line) {
                     receive(parsed)
+                } else {
+                    control(line)
                 }
             }
         }
@@ -348,7 +540,7 @@ final class ChatClient {
 
     // MARK: - IRC
 
-    nonisolated static func parse(_ line: String) -> ChatMessage? {
+    nonisolated static func splitTags(_ line: String) -> (tags: [Substring: Substring], rest: Substring) {
         var rest = Substring(line)
         var tags: [Substring: Substring] = [:]
         if rest.hasPrefix("@"), let space = rest.firstIndex(of: " ") {
@@ -358,6 +550,11 @@ final class ChatClient {
             }
             rest = rest[rest.index(after: space)...]
         }
+        return (tags, rest)
+    }
+
+    nonisolated static func parse(_ line: String) -> ChatMessage? {
+        let (tags, rest) = splitTags(line)
         let isNotice: Bool
         let afterChannel: Substring
         if let command = rest.range(of: " PRIVMSG #") {
@@ -385,6 +582,8 @@ final class ChatClient {
         var message = ChatMessage(name: name, color: color(tags["color"], name: login),
                                   parts: text.isEmpty ? [] : annotate(parts(text, emotes: tags["emotes"] ?? "")),
                                   isAction: isAction)
+        message.ircID = tags["id"].map(String.init)
+        message.login = login
         let msgID = tags["msg-id"].map(String.init) ?? ""
         if isNotice {
             // Una suscripción múltiple llega también regalo a regalo: basta con el aviso general

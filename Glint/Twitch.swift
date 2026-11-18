@@ -420,6 +420,82 @@ enum Twitch {
         return nil
     }
 
+    // MARK: - Cuenta
+
+    static func currentUser(token: String) async throws -> Account.User? {
+        struct R: Decodable { let currentUser: Account.User? }
+        let r: R = try await query("{ currentUser { id login displayName profileImageURL(width: 70) } }", token: token)
+        return r.currentUser
+    }
+
+    /// Canales que sigue la cuenta (hasta 500).
+    static func followedChannels(token: String) async throws -> [ChannelRef] {
+        struct Node: Decodable { let login: String; let displayName: String?; let profileImageURL: String? }
+        struct Edge: Decodable { let cursor: String?; let node: Node? }
+        struct Info: Decodable { let hasNextPage: Bool }
+        struct Follows: Decodable { let edges: [Edge]; let pageInfo: Info }
+        struct User: Decodable { let follows: Follows? }
+        struct R: Decodable { let currentUser: User? }
+        var out: [ChannelRef] = []
+        var after: String?
+        for _ in 0..<5 {
+            var variables: [String: Any] = [:]
+            if let after { variables["after"] = after }
+            let r: R = try await query("""
+                query($after: Cursor) { currentUser { follows(first: 100, after: $after) { \
+                edges { cursor node { login displayName profileImageURL(width: 70) } } pageInfo { hasNextPage } } } }
+                """, variables, token: token)
+            guard let follows = r.currentUser?.follows else { break }
+            out += follows.edges.compactMap { edge in
+                edge.node.map { ChannelRef(login: $0.login, displayName: $0.displayName ?? $0.login, avatar: $0.profileImageURL) }
+            }
+            guard follows.pageInfo.hasNextPage, let cursor = follows.edges.last?.cursor else { break }
+            after = cursor
+        }
+        return out
+    }
+
+    /// ¿La cuenta sigue a este canal? nil si no se pudo saber.
+    static func isFollowing(_ login: String, token: String) async -> Bool? {
+        struct Follower: Decodable { let followedAt: String? }
+        struct Relation: Decodable { let follower: Follower? }
+        struct User: Decodable { let `self`: Relation? }
+        struct R: Decodable { let user: User? }
+        guard let r: R = try? await query("query($login: String!) { user(login: $login) { self { follower { followedAt } } } }",
+                                          ["login": login], token: token),
+              let relation = r.user?.`self` else { return nil }
+        return relation.follower != nil
+    }
+
+    static func emoteSets(token: String) async throws -> [Account.EmoteSet] {
+        struct Emote: Decodable { let id: String?; let token: String? }
+        struct Owner: Decodable { let displayName: String? }
+        struct EmoteSetNode: Decodable { let id: String; let owner: Owner?; let emotes: [Emote?]? }
+        struct User: Decodable { let emoteSets: [EmoteSetNode?]? }
+        struct R: Decodable { let currentUser: User? }
+        let r: R = try await query("{ currentUser { emoteSets { id owner { displayName } emotes { id token } } } }", token: token)
+        let sets = (r.currentUser?.emoteSets ?? []).compactMap { $0 }.map { set in
+            Account.EmoteSet(id: set.id, owner: set.owner?.displayName ?? "Twitch",
+                             emotes: (set.emotes ?? []).compactMap { e in
+                                 guard let e, let id = e.id, let token = e.token else { return nil }
+                                 return Account.Emote(id: id, token: token)
+                             })
+        }
+        // Los de canales primero; los globales de Twitch al final
+        return sets.filter { !$0.emotes.isEmpty }.sorted { ($0.owner == "Twitch" ? 1 : 0) < ($1.owner == "Twitch" ? 1 : 0) }
+    }
+
+    /// Puntos de canal de la cuenta en ese canal.
+    static func pointsBalance(_ login: String, token: String) async -> Int? {
+        struct Points: Decodable { let balance: Int? }
+        struct Relation: Decodable { let communityPoints: Points? }
+        struct Channel: Decodable { let `self`: Relation? }
+        struct R: Decodable { let channel: Channel? }
+        let r: R? = try? await query("query($login: String!) { channel(name: $login) { self { communityPoints { balance } } } }",
+                                     ["login": login], token: token)
+        return r?.channel?.`self`?.communityPoints?.balance
+    }
+
     // MARK: - GraphQL
 
     private static let decoder: JSONDecoder = {
@@ -445,10 +521,12 @@ enum Twitch {
 
     private struct Ignored: Decodable {}
 
-    static func query<T: Decodable>(_ query: String, _ variables: [String: Any] = [:]) async throws -> T {
+    /// `token`: sesión del usuario, solo para lo que es de su cuenta (el resto va anónimo).
+    static func query<T: Decodable>(_ query: String, _ variables: [String: Any] = [:], token: String? = nil) async throws -> T {
         var request = URLRequest(url: URL(string: "https://gql.twitch.tv/gql")!)
         request.httpMethod = "POST"
         request.setValue(clientID, forHTTPHeaderField: "Client-ID")
+        if let token { request.setValue("OAuth \(token)", forHTTPHeaderField: "Authorization") }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["query": query, "variables": variables])
         let (data, _) = try await URLSession.shared.data(for: request)
