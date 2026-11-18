@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Icono de Glint (1024x1024): un destello de cuatro puntas menta sobre casi negro.
-Se dibuja a 4x y se reduce para suavizar los bordes."""
+"""Icono de Glint (1024x1024): anillo de progreso menta con el punto de búsqueda
+y un play blanco dentro, sobre casi negro. Se dibuja a 4x y se reduce para suavizar."""
+import math
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -9,38 +10,63 @@ SS = 4
 S = 1024 * SS
 
 
-def cubic(p0, p1, p2, p3, n=90):
-    pts = []
-    for i in range(n + 1):
-        t = i / n
-        a, b, c, d = (1 - t) ** 3, 3 * (1 - t) ** 2 * t, 3 * (1 - t) * t ** 2, t ** 3
-        pts.append((a * p0[0] + b * p1[0] + c * p2[0] + d * p3[0],
-                    a * p0[1] + b * p1[1] + c * p2[1] + d * p3[1]))
-    return pts
+def k(v):
+    return round(v * SS)
 
 
-def sparkle(cx, cy, r, pinch):
-    """Estrella de cuatro puntas con lados cóncavos; pinch = cuánto se acercan los lados al centro."""
-    tips = [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
-    pts = []
-    for i in range(4):
-        a, b = tips[i], tips[(i + 1) % 4]
-        mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
-        c = (cx + (mx - cx) * pinch, cy + (my - cy) * pinch)
-        pts += cubic(a, c, c, b)[:-1]
-    return [(x * SS, y * SS) for x, y in pts]
+def grad(c1, c2, angle):
+    """Degradado lineal de c1 a c2; angle 90 = de arriba a abajo."""
+    m = Image.linear_gradient("L").rotate(90 - angle, resample=Image.BICUBIC)
+    m = m.crop((40, 40, 216, 216)).resize((S, S), Image.BICUBIC)
+    return Image.composite(Image.new("RGB", (S, S), c2), Image.new("RGB", (S, S), c1), m)
 
 
-bg = Image.new("RGB", (S, S), (12, 14, 13))
-# Halo muy suave detrás del destello
+def play(cx, cy, h, r):
+    """Triángulo de play con esquinas de radio r, con el centroide en (cx, cy)."""
+    w = h * math.sqrt(3) / 2
+    x0 = cx - w / 3
+    pts = [(k(x0), k(cy - h / 2)), (k(x0 + w), k(cy)), (k(x0), k(cy + h / 2))]
+    gx, gy = k(cx), k(cy)
+    inradius = w / 3 * SS
+    f = (inradius - k(r)) / inradius
+    inner = [(gx + (x - gx) * f, gy + (y - gy) * f) for x, y in pts]
+    m = Image.new("L", (S, S), 0)
+    d = ImageDraw.Draw(m)
+    d.polygon(inner, fill=255)
+    for i, a in enumerate(inner):
+        b = inner[(i + 1) % 3]
+        d.line([a, b], fill=255, width=2 * k(r))
+        d.ellipse([a[0] - k(r), a[1] - k(r), a[0] + k(r), a[1] + k(r)], fill=255)
+    return m
+
+
+img = grad((20, 28, 26), (6, 8, 8), 90)
 glow = Image.new("L", (S, S), 0)
-ImageDraw.Draw(glow).ellipse([(300 * SS, 300 * SS), (724 * SS, 724 * SS)], fill=70)
-glow = glow.filter(ImageFilter.GaussianBlur(120 * SS))
-bg.paste((70, 190, 150), (0, 0), glow)
+ImageDraw.Draw(glow).ellipse([k(200), k(200), k(824), k(824)], fill=70)
+img.paste((50, 180, 140), (0, 0), glow.filter(ImageFilter.GaussianBlur(k(160))))
 
-draw = ImageDraw.Draw(bg)
-draw.polygon(sparkle(492, 532, 300, 0.12), fill=(102, 230, 184))
-draw.polygon(sparkle(748, 268, 92, 0.12), fill=(232, 255, 245))
+cx, cy, R, W = 512, 512, 318, 64
+box = [k(cx - R), k(cy - R), k(cx + R), k(cy + R)]
+track = Image.new("L", (S, S), 0)
+ImageDraw.Draw(track).ellipse(box, outline=255, width=k(W))
+img.paste((40, 58, 52), (0, 0), track)
 
-bg.resize((1024, 1024), Image.LANCZOS).save(OUT)
+# Tramo ya visto: desde arriba en sentido horario hasta el punto, con el inicio redondeado
+start, end = -90, 200
+rr = R - W / 2
+arc = Image.new("L", (S, S), 0)
+d = ImageDraw.Draw(arc)
+d.arc(box, start, end, fill=255, width=k(W))
+px, py = cx + rr * math.cos(math.radians(start)), cy + rr * math.sin(math.radians(start))
+d.ellipse([k(px - W / 2), k(py - W / 2), k(px + W / 2), k(py + W / 2)], fill=255)
+img.paste(grad((150, 247, 210), (32, 170, 128), 30), (0, 0), arc)
+
+# Punto de búsqueda, separado del anillo por un hueco oscuro
+px, py = cx + rr * math.cos(math.radians(end)), cy + rr * math.sin(math.radians(end))
+ImageDraw.Draw(img).ellipse([k(px - 80), k(py - 80), k(px + 80), k(py + 80)], fill=(10, 14, 13))
+ImageDraw.Draw(img).ellipse([k(px - 62), k(py - 62), k(px + 62), k(py + 62)], fill=(255, 255, 255))
+
+img.paste((255, 255, 255), (0, 0), play(cx + 6, cy, 300, 42))
+
+img.resize((1024, 1024), Image.LANCZOS).save(OUT)
 print("icono:", OUT)
