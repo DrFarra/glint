@@ -52,6 +52,12 @@ final class PlayerEngine {
     /// Mientras se cambia de vídeo y se salta a su punto, la posición no se toca
     /// (si no, por un momento valdría 0 y se guardaría ese 0 en el historial).
     @ObservationIgnored private var settling = false
+    /// En directo y pegado al final: se mantiene cerca del streamer (ver keepUp).
+    /// Deja de hacerlo si pausas o vas hacia atrás; "EN VIVO" lo vuelve a activar.
+    @ObservationIgnored private var followEdge = true
+    /// Segundos por detrás del último trozo de vídeo publicado. AVPlayer por defecto
+    /// empieza bastante más atrás; 4 s es lo mínimo sin que se corte a menudo.
+    static let liveDelay = 4.0
     /// Tipo de reproductor con el que se pide el directo (ver Twitch.adFreePlayerTypes).
     @ObservationIgnored private var playerAttempt = 0
     @ObservationIgnored private var adTask: Task<Void, Never>?
@@ -168,6 +174,7 @@ final class PlayerEngine {
                 master = playlist.url
                 qualities = playlist.qualities
                 mode = newMode
+                if newMode == .live { followEdge = true }
                 if let offset { position = offset }
                 skippingAd = false
                 if newMode == .live { watchForAds() } else { adTask?.cancel() }
@@ -247,6 +254,14 @@ final class PlayerEngine {
                 try? await Task.sleep(for: .milliseconds(300))
             }
             position = offset
+        } else if mode == .live {
+            // Empezar pegado al final del directo, no donde AVPlayer elige por defecto
+            await item.readyToPlay()
+            guard player.currentItem === item else { return }
+            if let end = item.seekableTimeRanges.last?.timeRangeValue.end.seconds, end.isFinite {
+                await player.seek(to: CMTime(seconds: max(0, end - Self.liveDelay), preferredTimescale: 600),
+                                  toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600))
+            }
         }
         player.defaultRate = mode == .live ? 1 : rate
         player.play()
@@ -255,7 +270,13 @@ final class PlayerEngine {
     // MARK: - Controles
 
     func togglePlay() {
-        if isPlaying { player.pause() } else { player.play() }
+        if isPlaying {
+            player.pause()
+            // Al pausar un directo, al reanudar sigue desde ahí (no salta)
+            followEdge = false
+        } else {
+            player.play()
+        }
     }
 
     func skip(_ seconds: Double) {
@@ -274,9 +295,10 @@ final class PlayerEngine {
             guard let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return }
             let back = duration - target
             let end = range.end.seconds
+            followEdge = back < 10
             if back < range.duration.seconds - 2 || archiveID == nil {
                 position = target
-                seekItem(to: max(range.start.seconds, end - max(back, 6)), updatePosition: false)
+                seekItem(to: max(range.start.seconds, end - max(back, Self.liveDelay)), updatePosition: false)
             } else {
                 load(.archive, at: target)
             }
@@ -338,7 +360,24 @@ final class PlayerEngine {
             let end = item.seekableTimeRanges.last?.timeRangeValue.end.seconds ?? t
             duration = elapsed
             position = max(0, elapsed - max(0, end - t))
+            keepUp(behind: end - t, end: end)
         }
+    }
+
+    /// Como la web de Twitch: si el vídeo se queda atrás (tras un corte de red o al
+    /// cargar), acelera un 10 % sin que se note hasta volver a ~4 s; si se queda muy
+    /// atrás, salta directamente.
+    private func keepUp(behind: Double, end: Double) {
+        guard player.timeControlStatus == .playing else { return }
+        var target: Float = 1
+        if followEdge, !player.isExternalPlaybackActive {
+            if behind > 15 {
+                seekItem(to: end - Self.liveDelay, updatePosition: false)
+                return
+            }
+            if behind > Self.liveDelay + 2 || (player.rate > 1 && behind > Self.liveDelay + 0.5) { target = 1.1 }
+        }
+        if player.rate != target { player.rate = target }
     }
 
     private func syncStatus() {
