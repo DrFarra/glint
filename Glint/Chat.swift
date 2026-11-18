@@ -108,12 +108,31 @@ final class ChatClient {
 
     func loadEmotes(channelID: String?) {
         emoteTask?.cancel()
+        // La lista guardada de la última vez sirve al instante; la de 7TV de un canal grande
+        // tarda varios segundos en llegar
+        if let cached = ThirdPartyEmotes.cached(channelID: channelID) { apply(cached) }
         emoteTask = Task { [weak self] in
             let emotes = await ThirdPartyEmotes.load(channelID: channelID)
-            guard !Task.isCancelled, let self else { return }
-            extraEmotes = emotes
-            markEmotesLoaded()
+            guard !Task.isCancelled, let self, !emotes.isEmpty else {
+                self?.markEmotesLoaded()
+                return
+            }
+            apply(emotes)
         }
+    }
+
+    /// Nueva lista de emotes: también se aplica a los mensajes que ya llegaron, para que
+    /// los que salieron antes de tenerla no se queden con el nombre del emote como texto.
+    private func apply(_ emotes: [String: String]) {
+        extraEmotes = emotes
+        if emotesLoaded {
+            messages = messages.map(expand)
+            held = held.map(expand)
+            ready = ready.map(expand)
+            staged = staged.map { (message: expand($0.message), arrived: $0.arrived) }
+            for message in messages + held { EmoteImages.shared.prefetch(message.emoteURLs) }
+        }
+        markEmotesLoaded()
     }
 
     private func markEmotesLoaded() {

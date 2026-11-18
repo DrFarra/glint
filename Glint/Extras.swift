@@ -17,8 +17,24 @@ enum ThirdPartyEmotes {
         async let seven = sevenTV("https://7tv.io/v3/users/twitch/\(id)", channel: true)
         async let bttv = betterTTV("https://api.betterttv.net/3/cached/users/twitch/\(id)", channel: true)
         async let ffz = frankerFaceZ("https://api.betterttv.net/3/cached/frankerfacez/users/twitch/\(id)")
-        for set in await [ffz, bttv, seven] { result.merge(set) { _, channel in channel } }
+        let sets = await [ffz, bttv, seven]
+        for set in sets { result.merge(set) { _, channel in channel } }
+        // Se guarda salvo que 7TV haya fallado y ya hubiera una lista (no perder sus emotes)
+        if !sets[2].isEmpty || cached(channelID: id) == nil, !result.isEmpty {
+            try? JSONEncoder().encode(result).write(to: cacheURL(id), options: .atomic)
+        }
         return result
+    }
+
+    /// Lista del canal guardada la última vez que se abrió.
+    static func cached(channelID: String?) -> [String: String]? {
+        guard let channelID, let data = try? Data(contentsOf: cacheURL(channelID)) else { return nil }
+        return try? JSONDecoder().decode([String: String].self, from: data)
+    }
+
+    private static func cacheURL(_ channelID: String) -> URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("emotes-\(channelID).json")
     }
 
     private static func loadGlobals() async -> [String: String] {
