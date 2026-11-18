@@ -1,0 +1,43 @@
+name: Glint
+options:
+  bundleIdPrefix: com.emilio
+  developmentLanguage: es
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Glint:
+    type: application
+    platform: iOS
+    sources:
+      - path: Glint
+    info:
+      path: Glint/Info.plist
+      properties:
+        CFBundleDisplayName: Glint
+        CFBundleDevelopmentRegion: es
+        CFBundleLocalizations: [es]
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ITSAppUsesNonExemptEncryption: false
+        UIBackgroundModes:
+          - audio
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.emilio.glint.live
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.emilio.glint
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
