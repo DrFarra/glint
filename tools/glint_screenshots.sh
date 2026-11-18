@@ -37,6 +37,7 @@ shot channel 10
 shot player 18
 shot chatstyles 16
 shot paused 16
+shot landscape 20
 shot mini 20
 shot vod 24
 shot clip 14

@@ -91,6 +91,14 @@ enum Demo {
                 try? await Task.sleep(for: .seconds(8))
                 playback.engine.togglePlay()
             }
+        case "landscape":
+            if let login {
+                playback.play(.live(login))
+                try? await Task.sleep(for: .seconds(8))
+                Orientation.set(landscape: true)
+                try? await Task.sleep(for: .seconds(2))
+                playback.engine.togglePlay()
+            }
         case "mini":
             if let login {
                 playback.play(.live(login))

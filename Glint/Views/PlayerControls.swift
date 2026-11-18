@@ -11,6 +11,8 @@ struct PlayerControls: View {
     let engine: PlayerEngine
     let title: String
     let subtitle: String
+    /// Espectadores del directo (nil en VOD y clips).
+    let viewers: Int?
     let problem: String?
     let landscape: Bool
     let safe: EdgeInsets
@@ -274,7 +276,18 @@ struct PlayerControls: View {
             }
             if landscape {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(subtitle).font(.subheadline.weight(.semibold))
+                    HStack(spacing: 8) {
+                        Text(subtitle).font(.subheadline.weight(.semibold))
+                        if let viewers {
+                            HStack(spacing: 4) {
+                                Circle().fill(Color.live).frame(width: 6, height: 6)
+                                Text(Format.count(viewers)).monospacedDigit()
+                            }
+                            .font(.caption.weight(.semibold))
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("\(Format.count(viewers)) espectadores")
+                        }
+                    }
                     Text(title).font(.caption).foregroundStyle(.white.opacity(0.75))
                 }
                 .lineLimit(1)

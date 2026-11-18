@@ -29,6 +29,10 @@ struct PlayerHost: View {
         }
     }
 
+    private var viewers: Int? {
+        if case .live = playback.media { playback.channel?.stream?.viewersCount } else { nil }
+    }
+
     /// Directos y VOD tienen chat; los clips no.
     private var hasChat: Bool {
         switch playback.media {
@@ -85,6 +89,7 @@ struct PlayerHost: View {
                 engine: playback.engine,
                 title: title,
                 subtitle: subtitle,
+                viewers: viewers,
                 problem: playback.problem,
                 landscape: layout.landscape,
                 safe: layout.insets,
