@@ -544,7 +544,7 @@ final class ChatClient {
     }
 
     nonisolated static func twitchEmoteURL(_ id: String) -> String {
-        "https://static-cdn.jtvnw.net/emoticons/v2/\(id)/default/dark/2.0"
+        "https://static-cdn.jtvnw.net/emoticons/v2/\(id)/default/dark/3.0"
     }
 
     // MARK: - IRC
@@ -781,19 +781,48 @@ final class EmoteImages {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let count = CGImageSourceGetCount(source)
         guard count > 0 else { return nil }
+        guard let first = CGImageSourceCreateImageAtIndex(source, 0, nil), first.height > 0 else { return nil }
+        // Todos los fotogramas se redibujan a la altura de una línea (22 pt) y con el mismo
+        // tamaño: antes cada uno salía a su tamaño original (los pequeños se veían pixelados
+        // o más chicos, y si un fotograma medía distinto el emote saltaba o pisaba el texto)
+        let canvas = canvasSize(source) ?? CGSize(width: first.width, height: first.height)
+        let size = CGSize(width: (Self.lineHeight * canvas.width / canvas.height).rounded(), height: Self.lineHeight)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 3
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
         // Como mucho ~100 fotogramas: los emotes largos se muestrean sin cambiar su velocidad
         let step = max(1, count / 100)
         var images: [UIImage] = []
         var ends: [Double] = []
         var elapsed = 0.0
         for index in stride(from: 0, to: count, by: step) {
-            guard let image = CGImageSourceCreateImageAtIndex(source, index, nil) else { continue }
-            // Todas a la altura de una línea de texto, sea cual sea su tamaño original
-            images.append(UIImage(cgImage: image, scale: max(1, CGFloat(image.height) / 22), orientation: .up))
+            guard let frame = index == 0 ? first : CGImageSourceCreateImageAtIndex(source, index, nil) else { continue }
+            images.append(renderer.image { _ in
+                UIImage(cgImage: frame).draw(in: CGRect(origin: .zero, size: size))
+            })
             elapsed += delay(source, index) * Double(step)
             ends.append(elapsed)
         }
         return images.isEmpty ? nil : Frames(images: images, ends: ends)
+    }
+
+    nonisolated private static let lineHeight: CGFloat = 22
+
+    /// Tamaño de la animación entera (puede ser mayor que el de un fotograma suelto).
+    nonisolated private static func canvasSize(_ source: CGImageSource) -> CGSize? {
+        let props = CGImageSourceCopyProperties(source, nil) as? [CFString: Any]
+        let pairs: [(CFString, CFString, CFString)] = [
+            (kCGImagePropertyWebPDictionary, kCGImagePropertyWebPCanvasPixelWidth, kCGImagePropertyWebPCanvasPixelHeight),
+            (kCGImagePropertyGIFDictionary, kCGImagePropertyGIFCanvasPixelWidth, kCGImagePropertyGIFCanvasPixelHeight),
+        ]
+        for (dict, w, h) in pairs {
+            if let d = props?[dict] as? [CFString: Any], let width = d[w] as? Double, let height = d[h] as? Double,
+               width > 0, height > 0 {
+                return CGSize(width: width, height: height)
+            }
+        }
+        return nil
     }
 
     /// Duración de un fotograma de GIF o WebP animado (0,1 s si no la indica o es absurda).

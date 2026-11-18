@@ -45,7 +45,7 @@ enum ThirdPartyEmotes {
             guard let name = emote["name"] as? String,
                   let host = (emote["data"] as? [String: Any])?["host"] as? [String: Any],
                   let base = host["url"] as? String else { continue }
-            result[name] = "https:\(base)/2x.webp"
+            result[name] = "https:\(base)/3x.webp"
         }
         return result
     }
@@ -61,7 +61,7 @@ enum ThirdPartyEmotes {
         var result: [String: String] = [:]
         for emote in emotes {
             if let code = emote["code"] as? String, let id = emote["id"] as? String {
-                result[code] = "https://cdn.betterttv.net/emote/\(id)/2x"
+                result[code] = "https://cdn.betterttv.net/emote/\(id)/3x"
             }
         }
         return result
@@ -71,7 +71,7 @@ enum ThirdPartyEmotes {
         var result: [String: String] = [:]
         for emote in await json(url) as? [[String: Any]] ?? [] {
             guard let code = emote["code"] as? String, let images = emote["images"] as? [String: Any],
-                  let image = (images["2x"] ?? images["1x"]) as? String else { continue }
+                  let image = (images["4x"] ?? images["2x"] ?? images["1x"]) as? String else { continue }
             result[code] = image
         }
         return result

@@ -105,7 +105,8 @@ struct ChatRow: View {
         Group {
             // Los mensajes con emotes animados se redibujan ~20 veces por segundo con el
             // fotograma que toca; todos los fotogramas miden lo mismo, así que nada se mueve
-            if message.emoteURLs.contains(where: { EmoteImages.shared.isAnimated($0) }) {
+            // También mientras falte alguna imagen: si llega tarde, aparece en vez de quedarse el nombre
+            if message.emoteURLs.contains(where: { EmoteImages.shared.isAnimated($0) || !EmoteImages.shared.isReady($0) }) {
                 TimelineView(.animation(minimumInterval: 1 / 20)) { context in
                     content(at: context.date)
                 }
