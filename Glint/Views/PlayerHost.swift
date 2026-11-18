@@ -59,6 +59,15 @@ struct PlayerHost: View {
                     .frame(width: PlayerLayout.chatWidth + layout.insets.trailing,
                            height: layout.size.height + layout.insets.top + layout.insets.bottom)
                     .background(Color(white: 0.06))
+                    // Deslizar el chat hacia el borde derecho lo cierra
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 20).onEnded { g in
+                            let dx = g.translation.width
+                            if dx > abs(g.translation.height) * 1.5, dx > 70 || g.predictedEndTranslation.width > 180 {
+                                withAnimation(.snappy) { chatOpen = false }
+                            }
+                        }
+                    )
                     .offset(x: layout.size.width - PlayerLayout.chatWidth, y: -layout.insets.top)
                     .opacity(1 - layout.progress * 2.5)
                     .allowsHitTesting(full)

@@ -5,7 +5,8 @@ import SwiftUI
 ///
 /// Gestos: toque = mostrar/ocultar · doble toque a los lados = ±10 s (se acumula)
 /// · deslizar en horizontal = buscar · deslizar abajo = minimizar (o salir de
-/// pantalla completa) · deslizar arriba = pantalla completa · pellizcar = rellenar.
+/// pantalla completa) · deslizar arriba = pantalla completa · pellizcar = rellenar
+/// · en horizontal, deslizar desde el borde derecho = abrir el chat.
 struct PlayerControls: View {
     let engine: PlayerEngine
     let title: String
@@ -28,6 +29,8 @@ struct PlayerControls: View {
     @State private var scrub: Double?
     @State private var panAxis: Axis?
     @State private var panOrigin: Double = 0
+    /// El arrastre empezó en el borde derecho: abre el chat en vez de buscar.
+    @State private var edgeSwipe = false
     @State private var jump: Jump?
     @State private var jumpTask: Task<Void, Never>?
     @State private var lastTap = Date.distantPast
@@ -156,6 +159,12 @@ struct PlayerControls: View {
     }
 
     private func pan(_ g: DragGesture.Value, width: CGFloat) {
+        // Coordenadas globales: en horizontal sin chat el vídeo ocupa toda la pantalla
+        if panAxis == nil, !edgeSwipe, active, landscape, showsChatToggle, !chatOpen,
+           g.startLocation.x > width - 44, -g.translation.width > abs(g.translation.height) {
+            edgeSwipe = true
+        }
+        if edgeSwipe { return }
         guard active || panAxis == .vertical else { return }
         if panAxis == nil {
             panAxis = abs(g.translation.width) > abs(g.translation.height) ? .horizontal : .vertical
@@ -176,6 +185,11 @@ struct PlayerControls: View {
     }
 
     private func endPan(_ g: DragGesture.Value) {
+        if edgeSwipe {
+            edgeSwipe = false
+            if g.translation.width < -60 || g.predictedEndTranslation.width < -160 { onToggleChat() }
+            return
+        }
         switch panAxis {
         case .horizontal:
             if let scrub { engine.seek(to: scrub) }
