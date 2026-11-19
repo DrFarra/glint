@@ -88,8 +88,22 @@ enum Demo {
             router.home.append(.history)
         case "channel":
             if let login { router.home.append(.channel(login)) }
-        case "player", "emoteslate":
+        case "player":
             if let login { playback.play(.live(login)) }
+        case "emoteslate":
+            // Emotes de 7TV del canal en un mensaje que llega ANTES que su lista (que tarda
+            // varios segundos): a los 45 s tienen que verse como imagen, no como texto
+            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            for file in (try? FileManager.default.contentsOfDirectory(atPath: caches.path)) ?? [] where file.hasPrefix("emotes-") {
+                try? FileManager.default.removeItem(at: caches.appendingPathComponent(file))
+            }
+            playback.play(.live("illojuan"))
+            try? await Task.sleep(for: .seconds(1))
+            playback.chat.injectForDemo([
+                "@display-name=PruebaEmotes;login=pruebaemotes;color=#66E6B8 :pruebaemotes!pruebaemotes@pruebaemotes.tmi.twitch.tv PRIVMSG #illojuan :IWASHERE KEK IWASTHERE",
+            ])
+            try? await Task.sleep(for: .seconds(6))
+            playback.chat.paused = true
         case "paused":
             if let login {
                 playback.play(.live(login))
