@@ -88,7 +88,7 @@ enum Demo {
             router.home.append(.history)
         case "channel":
             if let login { router.home.append(.channel(login)) }
-        case "player":
+        case "player", "emoteslate":
             if let login { playback.play(.live(login)) }
         case "paused":
             if let login {

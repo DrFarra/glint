@@ -10,19 +10,34 @@ import UserNotifications
 enum ThirdPartyEmotes {
     private static var globals: [String: String]?
 
-    static func load(channelID: String?) async -> [String: String] {
-        async let global = loadGlobals()
-        var result = await global
-        guard let id = channelID else { return result }
-        async let seven = sevenTV("https://7tv.io/v3/users/twitch/\(id)", channel: true)
-        async let bttv = betterTTV("https://api.betterttv.net/3/cached/users/twitch/\(id)", channel: true)
-        async let ffz = frankerFaceZ("https://api.betterttv.net/3/cached/frankerfacez/users/twitch/\(id)")
-        let sets = await [ffz, bttv, seven]
-        for set in sets { result.merge(set) { _, channel in channel } }
+    /// Pide las cuatro listas a la vez y avisa con lo que haya cada vez que llega una:
+    /// la de 7TV de un canal grande tarda varios segundos y no debe retrasar las demás.
+    /// Si dos listas tienen el mismo nombre, gana la del canal (7TV > BTTV > FFZ > globales).
+    static func load(channelID: String?, onUpdate: @escaping @MainActor ([String: String]) -> Void) async {
+        var parts: [Int: [String: String]] = [:]
+        await withTaskGroup(of: (Int, [String: String]).self) { group in
+            group.addTask { (0, await loadGlobals()) }
+            if let id = channelID {
+                group.addTask { (1, await frankerFaceZ("https://api.betterttv.net/3/cached/frankerfacez/users/twitch/\(id)")) }
+                group.addTask { (2, await betterTTV("https://api.betterttv.net/3/cached/users/twitch/\(id)", channel: true)) }
+                group.addTask { (3, await sevenTV("https://7tv.io/v3/users/twitch/\(id)", channel: true)) }
+            }
+            for await (index, set) in group {
+                parts[index] = set
+                guard !set.isEmpty, !Task.isCancelled else { continue }
+                await onUpdate(merged(parts))
+            }
+        }
         // Se guarda salvo que 7TV haya fallado y ya hubiera una lista (no perder sus emotes)
-        if !sets[2].isEmpty || cached(channelID: id) == nil, !result.isEmpty {
+        let result = merged(parts)
+        if let id = channelID, !result.isEmpty, parts[3]?.isEmpty == false || cached(channelID: id) == nil {
             try? JSONEncoder().encode(result).write(to: cacheURL(id), options: .atomic)
         }
+    }
+
+    private static func merged(_ parts: [Int: [String: String]]) -> [String: String] {
+        var result: [String: String] = [:]
+        for index in 0...3 { result.merge(parts[index] ?? [:]) { _, newer in newer } }
         return result
     }
 

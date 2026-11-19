@@ -37,6 +37,8 @@ shot account 8
 shot login 16
 shot channel 10
 shot player 18
+# El mismo directo 45 s después: los emotes de 7TV del canal ya tienen que verse
+shot emoteslate 45
 shot chatstyles 16
 shot paused 16
 shot landscape 20
