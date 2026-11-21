@@ -13,6 +13,7 @@ struct ChatView: View {
     @State private var atNewest = true
     @State private var replyTo: ChatMessage?
     @AppStorage("chatTextSize") private var textSize = ChatTextSize.normal
+    @AppStorage("chatAnimation") private var animate = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,7 +30,7 @@ struct ChatView: View {
             LazyVStack(alignment: .leading, spacing: 6) {
                 ForEach(chat.messages.reversed()) { message in
                     ChatRow(message: message, onReply: chat.authenticated ? { replyTo = $0 } : nil)
-                        .modifier(ChatArrival(shownAt: message.shownAt))
+                        .modifier(ChatArrival(shownAt: message.shownAt, enabled: animate))
                         .scaleEffect(x: 1, y: -1)
                 }
             }
@@ -102,10 +103,13 @@ struct ChatView: View {
 /// sitio que ocupa en la lista, así que ni el scroll ni los toques notan nada.
 struct ChatArrival: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppStorage("chatAnimation") private var enabled = true
+    /// El ajuste "Animar los mensajes nuevos" llega como valor y no como @AppStorage: uno por
+    /// fila haría redibujar todas las filas con cada mensaje.
+    let enabled: Bool
     @State private var settled: Bool
 
-    init(shownAt: Date?) {
+    init(shownAt: Date?, enabled: Bool) {
+        self.enabled = enabled
         // Al volver a un mensaje haciendo scroll también "aparece": ese ya no se anima
         _settled = State(initialValue: (shownAt?.timeIntervalSinceNow ?? -1) < -0.5)
     }
@@ -139,7 +143,7 @@ struct OverlayChat: View {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(chat.messages.suffix(14)) { message in
                         ChatRow(message: message)
-                            .modifier(ChatArrival(shownAt: message.shownAt))
+                            .modifier(ChatArrival(shownAt: message.shownAt, enabled: animate))
                             .transition(.opacity)
                     }
                 }

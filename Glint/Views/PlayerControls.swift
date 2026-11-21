@@ -707,7 +707,8 @@ private struct SettingsMenu: View {
     let engine: PlayerEngine
     let landscape: Bool
     let hasChat: Bool
-    @AppStorage("chatOverlay") private var chatOverlay = false
+    // Sin @AppStorage ni otras propiedades dinámicas: con una, SwiftUI ya no puede saltarse este
+    // menú cuando el reproductor se redibuja (cada 0,5 s) y el menú abierto no deja hacer scroll
 
     var body: some View {
         Menu {
@@ -731,7 +732,9 @@ private struct SettingsMenu: View {
                     Label("Rellenar pantalla", systemImage: "arrow.up.left.and.arrow.down.right.rectangle")
                 }
                 if hasChat {
-                    Toggle(isOn: $chatOverlay.animation(.snappy)) {
+                    // PlayerHost lo lee con @AppStorage y se entera del cambio
+                    Toggle(isOn: Binding(get: { UserDefaults.standard.bool(forKey: "chatOverlay") },
+                                         set: { UserDefaults.standard.set($0, forKey: "chatOverlay") })) {
                         Label("Chat sobre el vídeo", systemImage: "text.bubble")
                     }
                 }
