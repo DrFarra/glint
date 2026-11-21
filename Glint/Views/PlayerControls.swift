@@ -570,6 +570,8 @@ struct Scrubber: View {
     let onEnded: (Double) -> Void
 
     @State private var dragging = false
+    /// Últimas posiciones del dedo: al soltar se usa la de justo antes de levantarlo.
+    @State private var recent: [(time: Date, value: Double)] = []
 
     var body: some View {
         GeometryReader { geo in
@@ -615,12 +617,22 @@ struct Scrubber: View {
                     .onChanged { g in
                         guard enabled else { return }
                         dragging = true
-                        onChanged(position(g.location.x, width: geo.size.width))
+                        let value = position(g.location.x, width: geo.size.width)
+                        let now = Date()
+                        recent.append((now, value))
+                        recent.removeAll { now.timeIntervalSince($0.time) > 0.5 }
+                        onChanged(value)
                     }
                     .onEnded { g in
                         guard enabled else { return }
                         dragging = false
-                        onEnded(position(g.location.x, width: geo.size.width))
+                        // Al levantar el dedo siempre se mueve un poco, y en un vídeo largo cada punto
+                        // de la barra son muchos segundos: vale donde estaba 0,1 s antes de soltar
+                        let cutoff = Date().addingTimeInterval(-0.1)
+                        let value = recent.last { $0.time <= cutoff }?.value
+                            ?? recent.last?.value ?? position(g.location.x, width: geo.size.width)
+                        recent = []
+                        onEnded(value)
                     }
             )
         }
