@@ -491,6 +491,38 @@ enum Twitch {
         return sets.filter { !$0.emotes.isEmpty }.sorted { ($0.owner == "Twitch" ? 1 : 0) < ($1.owner == "Twitch" ? 1 : 0) }
     }
 
+    /// Seguir o dejar de seguir con la cuenta. Twitch pide aquí un token de integridad, el mismo
+    /// que saca su web; si aun así no lo aplica no da error claro, así que quien llama lo comprueba
+    /// después con `isFollowing`.
+    static func setFollow(_ login: String, _ follow: Bool, token: String) async throws {
+        struct U: Decodable { let id: String }
+        struct R: Decodable { let user: U? }
+        let r: R = try await query("query($login: String!) { user(login: $login) { id } }", ["login": login])
+        guard let id = r.user?.id else { throw Failure(message: "No se encontró el canal") }
+
+        var request = URLRequest(url: URL(string: "https://gql.twitch.tv/integrity")!)
+        request.httpMethod = "POST"
+        request.setValue(clientID, forHTTPHeaderField: "Client-ID")
+        request.setValue("OAuth \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(deviceID, forHTTPHeaderField: "X-Device-Id")
+        struct I: Decodable { let token: String }
+        let integrity = try JSONDecoder().decode(I.self, from: try await URLSession.shared.data(for: request).0).token
+
+        let mutation = follow
+            ? "mutation($id: ID!) { followUser(input: {targetID: $id, disableNotifications: false}) { follow { followedAt } } }"
+            : "mutation($id: ID!) { unfollowUser(input: {targetID: $id}) { follow { followedAt } } }"
+        let _: Ignored = try await query(mutation, ["id": id], token: token,
+                                         headers: ["Client-Integrity": integrity, "X-Device-Id": deviceID])
+    }
+
+    /// El token de integridad va atado a un id de dispositivo: siempre el mismo, como un navegador.
+    private static let deviceID: String = {
+        if let saved = UserDefaults.standard.string(forKey: "twitchDeviceID") { return saved }
+        let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        UserDefaults.standard.set(id, forKey: "twitchDeviceID")
+        return id
+    }()
+
     /// Puntos de canal de la cuenta en ese canal.
     static func pointsBalance(_ login: String, token: String) async -> Int? {
         struct Points: Decodable { let balance: Int? }
@@ -528,11 +560,13 @@ enum Twitch {
     private struct Ignored: Decodable {}
 
     /// `token`: sesión del usuario, solo para lo que es de su cuenta (el resto va anónimo).
-    static func query<T: Decodable>(_ query: String, _ variables: [String: Any] = [:], token: String? = nil) async throws -> T {
+    static func query<T: Decodable>(_ query: String, _ variables: [String: Any] = [:], token: String? = nil,
+                                    headers: [String: String] = [:]) async throws -> T {
         var request = URLRequest(url: URL(string: "https://gql.twitch.tv/gql")!)
         request.httpMethod = "POST"
         request.setValue(clientID, forHTTPHeaderField: "Client-ID")
         if let token { request.setValue("OAuth \(token)", forHTTPHeaderField: "Authorization") }
+        for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["query": query, "variables": variables])
         let (data, _) = try await URLSession.shared.data(for: request)
