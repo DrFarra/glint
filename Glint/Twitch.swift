@@ -229,7 +229,7 @@ enum Twitch {
             query($id: ID!) { video(id: $id) { muteInfo { mutedSegmentConnection { nodes { duration offset } } } } }
             """, ["id": id])
         let nodes = (r.video?.muteInfo?.mutedSegmentConnection?.nodes ?? []).sorted { ($0.offset ?? 0) < ($1.offset ?? 0) }
-        return merged(nodes.compactMap { node in
+        return merged(nodes.compactMap { node -> Range<Double>? in
             guard let offset = node.offset, let duration = node.duration, duration > 0 else { return nil }
             return Double(offset)..<Double(offset + duration)
         })
