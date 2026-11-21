@@ -39,6 +39,8 @@ struct ChatView: View {
         .scaleEffect(x: 1, y: -1)
         .scrollPosition($position)
         .scrollIndicators(.hidden)
+        // Deslizar el chat cierra el teclado (la lista va volteada: mejor de golpe que "interactivo")
+        .scrollDismissesKeyboard(.immediately)
         // En cuanto el dedo toca el chat se congela, para que nada se mueva bajo el dedo.
         // Al soltar: si quedó abajo del todo vuelve a seguir el directo; si no, sigue en pausa.
         .onScrollPhaseChange { _, newPhase in

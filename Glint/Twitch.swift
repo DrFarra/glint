@@ -491,37 +491,104 @@ enum Twitch {
         return sets.filter { !$0.emotes.isEmpty }.sorted { ($0.owner == "Twitch" ? 1 : 0) < ($1.owner == "Twitch" ? 1 : 0) }
     }
 
-    /// Seguir o dejar de seguir con la cuenta. Twitch pide aquí un token de integridad, el mismo
-    /// que saca su web; si aun así no lo aplica no da error claro, así que quien llama lo comprueba
-    /// después con `isFollowing`.
+    /// Seguir o dejar de seguir con la cuenta (vía la web invisible, ver TwitchBridge). Quien
+    /// llama lo comprueba después con `isFollowing`.
+    @MainActor
     static func setFollow(_ login: String, _ follow: Bool, token: String) async throws {
         struct U: Decodable { let id: String }
         struct R: Decodable { let user: U? }
         let r: R = try await query("query($login: String!) { user(login: $login) { id } }", ["login": login])
         guard let id = r.user?.id else { throw Failure(message: "No se encontró el canal") }
-
-        var request = URLRequest(url: URL(string: "https://gql.twitch.tv/integrity")!)
-        request.httpMethod = "POST"
-        request.setValue(clientID, forHTTPHeaderField: "Client-ID")
-        request.setValue("OAuth \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue(deviceID, forHTTPHeaderField: "X-Device-Id")
-        struct I: Decodable { let token: String }
-        let integrity = try JSONDecoder().decode(I.self, from: try await URLSession.shared.data(for: request).0).token
-
         let mutation = follow
             ? "mutation($id: ID!) { followUser(input: {targetID: $id, disableNotifications: false}) { follow { followedAt } } }"
             : "mutation($id: ID!) { unfollowUser(input: {targetID: $id}) { follow { followedAt } } }"
-        let _: Ignored = try await query(mutation, ["id": id], token: token,
-                                         headers: ["Client-Integrity": integrity, "X-Device-Id": deviceID])
+        _ = try await TwitchBridge.mutate(mutation, ["id": id], token: token)
     }
 
-    /// El token de integridad va atado a un id de dispositivo: siempre el mismo, como un navegador.
-    private static let deviceID: String = {
-        if let saved = UserDefaults.standard.string(forKey: "twitchDeviceID") { return saved }
-        let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-        UserDefaults.standard.set(id, forKey: "twitchDeviceID")
-        return id
-    }()
+    // MARK: - Puntos del canal
+
+    struct Reward: Decodable, Identifiable {
+        let id: String
+        let title: String
+        let cost: Int
+        let prompt: String?
+        let isEnabled: Bool?
+        let isPaused: Bool?
+        let isInStock: Bool?
+        let isUserInputRequired: Bool?
+        let backgroundColor: String?
+        let image: Image?
+        let defaultImage: Image?
+        let cooldownExpiresAt: Date?
+        struct Image: Decodable { let url2x: String? }
+
+        var imageURL: URL? { (image?.url2x ?? defaultImage?.url2x).flatMap(URL.init(string:)) }
+        var available: Bool {
+            isEnabled != false && isPaused != true && isInStock != false && (cooldownExpiresAt ?? .distantPast) < Date()
+        }
+    }
+
+    struct Points {
+        let channelID: String
+        /// Cómo llama el canal a sus puntos ("Puntuelos") y su icono.
+        let name: String?
+        let iconURL: URL?
+        let balance: Int?
+        /// Cofre de bonificación listo para reclamar.
+        let claimID: String?
+        let rewards: [Reward]
+    }
+
+    /// Puntos de la cuenta en el canal y sus recompensas (cada canal tiene las suyas).
+    static func points(_ login: String, token: String) async throws -> Points {
+        struct Claim: Decodable { let id: String }
+        struct CP: Decodable { let balance: Int?; let availableClaim: Claim? }
+        struct Me: Decodable { let communityPoints: CP? }
+        struct Icon: Decodable { let url: String? }
+        struct Settings: Decodable { let name: String?; let image: Icon?; let customRewards: [Reward]? }
+        struct C: Decodable { let id: String; let `self`: Me?; let communityPointsSettings: Settings? }
+        struct R: Decodable { let channel: C? }
+        let r: R = try await query("""
+            query($login: String!) { channel(name: $login) { id self { communityPoints { balance availableClaim { id } } } \
+            communityPointsSettings { name image { url } customRewards { id title cost prompt isEnabled isPaused isInStock \
+            isUserInputRequired backgroundColor image { url2x } defaultImage { url2x } cooldownExpiresAt } } } }
+            """, ["login": login], token: token)
+        guard let c = r.channel else { throw Failure(message: "No se encontró el canal") }
+        let settings = c.communityPointsSettings
+        return Points(channelID: c.id, name: settings?.name, iconURL: settings?.image?.url.flatMap(URL.init(string:)),
+                      balance: c.`self`?.communityPoints?.balance, claimID: c.`self`?.communityPoints?.availableClaim?.id,
+                      rewards: (settings?.customRewards ?? []).sorted { $0.cost < $1.cost })
+    }
+
+    @MainActor
+    static func redeem(_ reward: Reward, channelID: String, text: String?, token: String) async throws {
+        let data = try await TwitchBridge.mutate("""
+            mutation($input: RedeemCommunityPointsCustomRewardInput!) { redeemCommunityPointsCustomReward(input: $input) { error { code } } }
+            """, ["input": ["channelID": channelID, "cost": reward.cost, "prompt": text ?? NSNull(), "rewardID": reward.id,
+                            "title": reward.title, "transactionID": UUID().uuidString.replacingOccurrences(of: "-", with: "")]],
+            token: token)
+        if let code = ((data["redeemCommunityPointsCustomReward"] as? [String: Any])?["error"] as? [String: Any])?["code"] as? String {
+            throw Failure(message: rewardError(code))
+        }
+    }
+
+    @MainActor
+    static func claimBonus(channelID: String, claimID: String, token: String) async throws {
+        _ = try await TwitchBridge.mutate("""
+            mutation($input: ClaimCommunityPointsInput!) { claimCommunityPoints(input: $input) { error { code } } }
+            """, ["input": ["channelID": channelID, "claimID": claimID]], token: token)
+    }
+
+    private static func rewardError(_ code: String) -> String {
+        switch code {
+        case "NOT_ENOUGH_POINTS": "No tienes puntos suficientes"
+        case "PROPERTIES_MISMATCH": "La recompensa ha cambiado: vuelve a abrirla"
+        case "COOLDOWN", "GLOBAL_COOLDOWN": "Esta recompensa está en espera"
+        case "MAX_PER_STREAM", "MAX_PER_USER_PER_STREAM": "Ya no se puede canjear más en este directo"
+        case "DISABLED", "PAUSED", "OUT_OF_STOCK": "Esta recompensa no está disponible ahora"
+        default: "Twitch no pudo canjearla (\(code))"
+        }
+    }
 
     /// Puntos de canal de la cuenta en ese canal.
     static func pointsBalance(_ login: String, token: String) async -> Int? {
@@ -560,13 +627,11 @@ enum Twitch {
     private struct Ignored: Decodable {}
 
     /// `token`: sesión del usuario, solo para lo que es de su cuenta (el resto va anónimo).
-    static func query<T: Decodable>(_ query: String, _ variables: [String: Any] = [:], token: String? = nil,
-                                    headers: [String: String] = [:]) async throws -> T {
+    static func query<T: Decodable>(_ query: String, _ variables: [String: Any] = [:], token: String? = nil) async throws -> T {
         var request = URLRequest(url: URL(string: "https://gql.twitch.tv/gql")!)
         request.httpMethod = "POST"
         request.setValue(clientID, forHTTPHeaderField: "Client-ID")
         if let token { request.setValue("OAuth \(token)", forHTTPHeaderField: "Authorization") }
-        for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["query": query, "variables": variables])
         let (data, _) = try await URLSession.shared.data(for: request)

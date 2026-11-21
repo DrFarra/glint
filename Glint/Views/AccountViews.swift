@@ -257,9 +257,8 @@ struct ChatComposer: View {
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showPoints, onDismiss: refreshPoints) {
-            if let channel = chat.channel, let url = URL(string: "https://www.twitch.tv/popout/\(channel)/chat?popout=") {
-                TwitchWebSheet(title: "Puntos y predicciones", url: url,
-                               hint: "Chat de Twitch: aquí puedes canjear puntos, apostar en predicciones y votar en encuestas.")
+            if let channel = chat.channel {
+                PointsView(login: channel)
             }
         }
         .task(id: "\(chat.channel ?? "")-\(account.user?.id ?? "")") {
@@ -288,7 +287,12 @@ struct ChatComposer: View {
                     if value.count > 500 { text = String(value.prefix(500)) }
                 }
 
-            if text.isEmpty {
+            if text.isEmpty, focused {
+                Button { focused = false } label: {
+                    Image(systemName: "keyboard.chevron.compact.down").font(.title3).frame(width: 32, height: 36)
+                }
+                .accessibilityLabel("Ocultar teclado")
+            } else if text.isEmpty {
                 Button { showPoints = true } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "star.circle.fill")
@@ -325,6 +329,24 @@ struct ChatComposer: View {
     private func refreshPoints() {
         guard let token = account.token, let channel = chat.channel else { return }
         Task { points = await Twitch.pointsBalance(channel, token: token) }
+    }
+}
+
+/// Un emote del selector, de la misma caché que el chat: los que ya salieron en el chat aparecen
+/// al instante y los que se bajan aquí ya estarán listos cuando alguien los use.
+private struct EmoteCell: View {
+    let url: String
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFit()
+            } else {
+                RoundedRectangle(cornerRadius: 6).fill(Color.surface)
+            }
+        }
+        .task(id: url) { image = await EmoteImages.shared.loaded(url) }
     }
 }
 
@@ -366,14 +388,10 @@ struct EmotePicker: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 44), spacing: 6)], spacing: 6) {
                 ForEach(Array(emotes.enumerated()), id: \.offset) { _, emote in
                     Button { onPick(emote.name) } label: {
-                        AsyncImage(url: URL(string: emote.url)) { image in
-                            image.resizable().scaledToFit()
-                        } placeholder: {
-                            RoundedRectangle(cornerRadius: 6).fill(Color.surface)
-                        }
-                        .frame(width: 32, height: 32)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
+                        EmoteCell(url: emote.url)
+                            .frame(width: 32, height: 32)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(PressStyle())
                     .accessibilityLabel(emote.name)

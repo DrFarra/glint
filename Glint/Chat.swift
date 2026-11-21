@@ -789,6 +789,19 @@ final class EmoteImages {
         }
     }
 
+    /// Espera a tener la imagen, para las vistas que sí quieren enterarse (el selector de emotes).
+    func loaded(_ url: String) async -> UIImage? {
+        if !isReady(url) {
+            if loading.insert(url).inserted {
+                await load(url)
+            } else {
+                // Ya la está bajando otro: se espera a que acabe
+                while loading.contains(url), !Task.isCancelled { try? await Task.sleep(for: .milliseconds(80)) }
+            }
+        }
+        return image(url)
+    }
+
     private func load(_ link: String) async {
         defer { loading.remove(link) }
         guard let url = URL(string: link), let data = try? await URLSession.shared.data(from: url).0 else {
