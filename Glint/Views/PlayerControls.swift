@@ -1,3 +1,5 @@
+import AVFoundation
+import MediaPlayer
 import SwiftUI
 
 /// Controles sobre el vídeo. Todo tiene un sitio fijo: pausar solo cambia el
@@ -6,7 +8,8 @@ import SwiftUI
 /// Gestos: toque = mostrar/ocultar · doble toque a los lados = ±10 s (se acumula)
 /// · deslizar en horizontal = buscar · deslizar abajo = minimizar (o salir de
 /// pantalla completa) · deslizar arriba = pantalla completa · pellizcar = rellenar
-/// · en horizontal, deslizar desde el borde derecho = abrir el chat.
+/// · en horizontal, deslizar desde el borde derecho = abrir el chat
+/// · en horizontal, deslizar arriba/abajo por el tercio izquierdo = brillo, por el derecho = volumen.
 struct PlayerControls: View {
     let engine: PlayerEngine
     let title: String
@@ -18,6 +21,8 @@ struct PlayerControls: View {
     let safe: EdgeInsets
     let active: Bool
     let chatOpen: Bool
+    /// El chat ocupa un panel a la derecha (no va encima del vídeo).
+    let chatBeside: Bool
     let showsChatToggle: Bool
     let onMinimize: () -> Void
     let onFullscreen: () -> Void
@@ -37,10 +42,20 @@ struct PlayerControls: View {
     @State private var jumpTask: Task<Void, Never>?
     @State private var lastTap = Date.distantPast
     @State private var lastTapZone = 0
+    /// Brillo o volumen que se está cambiando con el dedo (y su indicador, que dura un poco más).
+    @State private var level: Level?
+    @State private var levelTask: Task<Void, Never>?
 
     private struct Jump: Equatable {
         var forward: Bool
         var seconds: Int
+    }
+
+    private struct Level: Equatable {
+        enum Kind { case brightness, volume }
+        let kind: Kind
+        let start: Float
+        var value: Float
     }
 
     private var message: String? { problem ?? engine.error }
@@ -48,9 +63,22 @@ struct PlayerControls: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                gestureLayer(width: geo.size.width)
+                gestureLayer(size: geo.size)
+
+                if landscape {
+                    // Con uno en pantalla, iOS no tapa el vídeo con su aviso de volumen
+                    SystemVolume.Host().frame(width: 1, height: 1).opacity(0.01).allowsHitTesting(false)
+                }
 
                 if active {
+                    if let level {
+                        levelIndicator(level)
+                            .frame(maxHeight: .infinity, alignment: .top)
+                            .padding(.top, max(safe.top, 12) + 44)
+                            .allowsHitTesting(false)
+                            .transition(.opacity)
+                    }
+
                     chrome
                         .opacity(visible ? 1 : 0)
                         .allowsHitTesting(visible)
@@ -88,6 +116,7 @@ struct PlayerControls: View {
         .animation(.easeOut(duration: 0.12), value: visible)
         .animation(.snappy, value: engine.currentMuted)
         .animation(.easeOut(duration: 0.2), value: engine.skippingAd)
+        .animation(.easeOut(duration: 0.2), value: level == nil)
         .sensoryFeedback(.impact(weight: .light), trigger: jump?.seconds)
         .onChange(of: engine.isPlaying) { _, playing in
             if playing { scheduleHide() } else { show(keep: true) }
@@ -101,14 +130,14 @@ struct PlayerControls: View {
 
     // MARK: - Gestos
 
-    private func gestureLayer(width: CGFloat) -> some View {
+    private func gestureLayer(size: CGSize) -> some View {
         Color.clear
             .contentShape(Rectangle())
             // Un solo reconocedor de toques: así no hay que esperar a descartar un doble toque
-            .gesture(SpatialTapGesture().onEnded { tap(at: $0.location.x / max(width, 1)) })
+            .gesture(SpatialTapGesture().onEnded { tap(at: $0.location.x / max(size.width, 1)) })
             .simultaneousGesture(
                 DragGesture(minimumDistance: 14, coordinateSpace: .global)
-                    .onChanged { pan($0, width: width) }
+                    .onChanged { pan($0, size: size) }
                     .onEnded { endPan($0) }
             )
             .simultaneousGesture(
@@ -160,8 +189,9 @@ struct PlayerControls: View {
         }
     }
 
-    private func pan(_ g: DragGesture.Value, width: CGFloat) {
-        // Coordenadas globales: en horizontal sin chat el vídeo ocupa toda la pantalla
+    private func pan(_ g: DragGesture.Value, size: CGSize) {
+        let width = size.width
+        // Coordenadas globales: en horizontal el vídeo empieza en el borde izquierdo de la pantalla
         if panAxis == nil, !edgeSwipe, active, landscape, showsChatToggle, !chatOpen,
            g.startLocation.x > width - 44, -g.translation.width > abs(g.translation.height) {
             edgeSwipe = true
@@ -171,6 +201,30 @@ struct PlayerControls: View {
         if panAxis == nil {
             panAxis = abs(g.translation.width) > abs(g.translation.height) ? .horizontal : .vertical
             panOrigin = engine.position
+            levelTask?.cancel()
+            level = nil
+            // Por los laterales, en vertical: brillo a la izquierda, volumen a la derecha.
+            // Por el centro sigue siendo salir de pantalla completa.
+            if panAxis == .vertical, landscape, active {
+                let x = g.startLocation.x / max(width, 1)
+                if x < 1 / 3 {
+                    let now = Float(SystemVolume.screen?.brightness ?? 0.5)
+                    level = Level(kind: .brightness, start: now, value: now)
+                } else if x > 2 / 3 {
+                    let now = AVAudioSession.sharedInstance().outputVolume
+                    level = Level(kind: .volume, start: now, value: now)
+                }
+            }
+        }
+        if panAxis == .vertical, var current = level {
+            // Subir el dedo el 70 % de la altura va de 0 a 100 %
+            current.value = min(max(current.start - Float(g.translation.height / max(size.height * 0.7, 1)), 0), 1)
+            switch current.kind {
+            case .brightness: SystemVolume.screen?.brightness = CGFloat(current.value)
+            case .volume: SystemVolume.set(current.value)
+            }
+            level = current
+            return
         }
         switch panAxis {
         case .horizontal:
@@ -198,7 +252,15 @@ struct PlayerControls: View {
             scrub = nil
             scheduleHide()
         case .vertical:
-            onDragEnd(g.translation.height, g.predictedEndTranslation.height)
+            if level != nil {
+                levelTask = Task {
+                    try? await Task.sleep(for: .milliseconds(700))
+                    guard !Task.isCancelled else { return }
+                    level = nil
+                }
+            } else {
+                onDragEnd(g.translation.height, g.predictedEndTranslation.height)
+            }
         case nil:
             break
         }
@@ -255,7 +317,7 @@ struct PlayerControls: View {
             .padding(.top, landscape ? max(safe.top, 10) : 2)
             .padding(.bottom, landscape ? max(safe.bottom, 6) : 0)
             .padding(.leading, landscape ? max(safe.leading, 12) : 4)
-            .padding(.trailing, landscape && !chatOpen ? max(safe.trailing, 12) : 4)
+            .padding(.trailing, landscape && !chatBeside ? max(safe.trailing, 12) : 4)
 
             if message == nil {
                 centerButtons
@@ -298,7 +360,7 @@ struct PlayerControls: View {
             if engine.supportsPiP {
                 icon("pip.enter", label: "Imagen dentro de imagen") { engine.togglePiP() }
             }
-            SettingsMenu(engine: engine, landscape: landscape)
+            SettingsMenu(engine: engine, landscape: landscape, hasChat: showsChatToggle)
             if landscape && showsChatToggle {
                 icon(chatOpen ? "bubble.left.fill" : "bubble.left", label: chatOpen ? "Ocultar chat" : "Mostrar chat") {
                     onToggleChat()
@@ -409,6 +471,25 @@ struct PlayerControls: View {
         .buttonStyle(.plain)
         .glassEffect(.regular.tint(.black.opacity(0.35)).interactive(), in: Capsule())
         .accessibilityLabel("Saltar el tramo con audio silenciado")
+    }
+
+    private func levelIndicator(_ level: Level) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: level.kind == .brightness ? "sun.max.fill" : level.value == 0 ? "speaker.slash.fill" : "speaker.wave.3.fill",
+                  variableValue: level.kind == .volume ? Double(level.value) : nil)
+                .font(.system(size: 16, weight: .semibold))
+                .frame(width: 24)
+            Capsule().fill(.white.opacity(0.25))
+                .frame(width: 130, height: 5)
+                .overlay(alignment: .leading) {
+                    Capsule().fill(.white).frame(width: 130 * CGFloat(level.value))
+                }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .background(.black.opacity(0.55), in: Capsule())
+        .accessibilityHidden(true)
     }
 
     private func scrubReadout(_ value: Double) -> some View {
@@ -579,6 +660,25 @@ struct Scrubber: View {
     }
 }
 
+/// Volumen y brillo del sistema. iOS no tiene API para poner el volumen: solo se puede con el
+/// deslizador de un MPVolumeView (es lo que hacen los reproductores de vídeo conocidos).
+enum SystemVolume {
+    private static let view = MPVolumeView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+
+    static func set(_ value: Float) {
+        (view.subviews.first { $0 is UISlider } as? UISlider)?.value = value
+    }
+
+    static var screen: UIScreen? {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first?.screen
+    }
+
+    struct Host: UIViewRepresentable {
+        func makeUIView(context: Context) -> MPVolumeView { SystemVolume.view }
+        func updateUIView(_ view: MPVolumeView, context: Context) {}
+    }
+}
+
 /// "EN VIVO": rojo cuando estás al día; gris y pulsable cuando vas por detrás.
 struct LivePill: View {
     let atEdge: Bool
@@ -605,6 +705,8 @@ struct LivePill: View {
 private struct SettingsMenu: View {
     let engine: PlayerEngine
     let landscape: Bool
+    let hasChat: Bool
+    @AppStorage("chatOverlay") private var chatOverlay = false
 
     var body: some View {
         Menu {
@@ -626,6 +728,11 @@ private struct SettingsMenu: View {
             if landscape {
                 Toggle(isOn: Binding(get: { engine.fill }, set: { value in withAnimation { engine.fill = value } })) {
                     Label("Rellenar pantalla", systemImage: "arrow.up.left.and.arrow.down.right.rectangle")
+                }
+                if hasChat {
+                    Toggle(isOn: $chatOverlay.animation(.snappy)) {
+                        Label("Chat sobre el vídeo", systemImage: "text.bubble")
+                    }
                 }
             }
         } label: {

@@ -28,6 +28,7 @@ struct ChatView: View {
             LazyVStack(alignment: .leading, spacing: 6) {
                 ForEach(chat.messages.reversed()) { message in
                     ChatRow(message: message, onReply: chat.authenticated ? { replyTo = $0 } : nil)
+                        .modifier(ChatArrival(shownAt: message.shownAt))
                         .scaleEffect(x: 1, y: -1)
                 }
             }
@@ -91,6 +92,60 @@ struct ChatView: View {
         case 1: "1 mensaje nuevo"
         default: "\(chat.pendingCount) mensajes nuevos"
         }
+    }
+}
+
+/// Entrada de un mensaje nuevo: sube un poco y aparece. Solo cambia cómo se dibuja, nunca el
+/// sitio que ocupa en la lista, así que ni el scroll ni los toques notan nada.
+struct ChatArrival: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var settled: Bool
+
+    init(shownAt: Date?) {
+        // Al volver a un mensaje haciendo scroll también "aparece": ese ya no se anima
+        _settled = State(initialValue: (shownAt?.timeIntervalSinceNow ?? -1) < -0.5)
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(settled ? 1 : 0)
+            .offset(y: settled || reduceMotion ? 0 : 14)
+            .scaleEffect(settled || reduceMotion ? 1 : 0.94, anchor: .bottomLeading)
+            .onAppear {
+                guard !settled else { return }
+                withAnimation(.spring(duration: 0.4, bounce: 0.3)) { settled = true }
+            }
+    }
+}
+
+/// Chat encima del vídeo a pantalla completa: los últimos mensajes sin fondo, como parte de la
+/// imagen. Solo se lee; los toques pasan al vídeo.
+struct OverlayChat: View {
+    let chat: ChatClient
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(chat.messages.suffix(14)) { message in
+                ChatRow(message: message)
+                    .modifier(ChatArrival(shownAt: message.shownAt))
+                    .transition(.opacity)
+            }
+        }
+        // Aquí no hay scroll que descolocar: los de arriba suben con suavidad
+        .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: chat.messages.last?.id)
+        .frame(maxHeight: .infinity, alignment: .bottomLeading)
+        .environment(\.colorScheme, .dark)
+        // Una sola sombra para todo el bloque: se lee sobre cualquier imagen y cuesta poco
+        .compositingGroup()
+        .shadow(color: .black.opacity(0.9), radius: 1.5)
+        .shadow(color: .black.opacity(0.5), radius: 6)
+        .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.35)],
+                             startPoint: .top, endPoint: .bottom))
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        // Si el chat lateral quedó en pausa, aquí no hay forma de reanudarlo
+        .onAppear { chat.paused = false }
     }
 }
 

@@ -11,6 +11,8 @@ struct PlayerHost: View {
     @State private var drag: CGFloat?
     @State private var chatOpen = true
     @State private var cardOffset: CGFloat = 0
+    /// A pantalla completa, el chat va encima del vídeo en vez de en un panel al lado.
+    @AppStorage("chatOverlay") private var chatOverlay = false
 
     private var progress: CGFloat { drag ?? (playback.minimized ? 1 : 0) }
 
@@ -18,12 +20,14 @@ struct PlayerHost: View {
         if playback.media != nil {
             GeometryReader { geo in
                 let layout = PlayerLayout(size: geo.size, insets: geo.safeAreaInsets, progress: progress,
-                                          chatOpen: chatOpen && hasChat, offset: cardOffset)
+                                          chatOpen: chatBeside, offset: cardOffset)
                 content(layout)
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                     .statusBarHidden(layout.landscape && progress == 0)
                     .persistentSystemOverlays(layout.landscape && progress == 0 ? .hidden : .automatic)
             }
+            // Al cambiar de modo se ve el chat, si no el ajuste parece no hacer nada
+            .onChange(of: chatOverlay) { withAnimation(.snappy) { chatOpen = true } }
             // A pantalla completa el teclado empuja el chat hacia arriba para ver lo que escribes;
             // en mini, la tarjeta no se mueve
             .ignoresSafeArea(playback.minimized || drag != nil ? .keyboard : [])
@@ -43,6 +47,9 @@ struct PlayerHost: View {
         }
     }
 
+    /// Chat en el panel lateral (solo cuenta en horizontal; en vertical va debajo del vídeo).
+    private var chatBeside: Bool { chatOpen && hasChat && !chatOverlay }
+
     @ViewBuilder
     private func content(_ layout: PlayerLayout) -> some View {
         let full = layout.progress < 0.01 && drag == nil
@@ -59,7 +66,7 @@ struct PlayerHost: View {
                     .offset(y: layout.full.maxY + layout.progress * 240)
                     .opacity(1 - layout.progress * 2.5)
                     .allowsHitTesting(full)
-            } else if chatOpen, hasChat {
+            } else if chatBeside {
                 ChatView(chat: playback.chat)
                     .padding(.trailing, layout.insets.trailing)
                     .frame(width: PlayerLayout.chatWidth + layout.insets.trailing,
@@ -87,6 +94,16 @@ struct PlayerHost: View {
                 .offset(x: layout.video.minX, y: layout.video.minY)
                 .allowsHitTesting(false)
 
+            if layout.landscape, chatOverlay, chatOpen, hasChat {
+                OverlayChat(chat: playback.chat)
+                    // Abajo a la izquierda, por encima de la barra de progreso
+                    .frame(width: min(330, layout.size.width * 0.4), height: layout.size.height * 0.6)
+                    .offset(x: max(layout.insets.leading, 16) - layout.insets.leading,
+                            y: layout.size.height * 0.4 - max(layout.insets.bottom, 6) - 52)
+                    .opacity(1 - layout.progress * 2.5)
+                    .transition(.opacity)
+            }
+
             PlayerControls(
                 engine: playback.engine,
                 title: title,
@@ -97,6 +114,7 @@ struct PlayerHost: View {
                 safe: layout.insets,
                 active: layout.progress < 0.01,
                 chatOpen: chatOpen && hasChat,
+                chatBeside: chatBeside,
                 showsChatToggle: hasChat,
                 onMinimize: { withAnimation(.snappy) { playback.minimized = true } },
                 onFullscreen: { Orientation.set(landscape: !layout.landscape) },
