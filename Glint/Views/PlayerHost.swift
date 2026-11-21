@@ -13,6 +13,8 @@ struct PlayerHost: View {
     @State private var cardOffset: CGFloat = 0
     /// A pantalla completa, el chat va encima del vídeo en vez de en un panel al lado.
     @AppStorage("chatOverlay") private var chatOverlay = false
+    @AppStorage("chatOverlayTrailing") private var overlayTrailing = false
+    @AppStorage("chatOverlayOpacity") private var overlayOpacity = 1.0
 
     private var progress: CGFloat { drag ?? (playback.minimized ? 1 : 0) }
 
@@ -95,12 +97,15 @@ struct PlayerHost: View {
                 .allowsHitTesting(false)
 
             if layout.landscape, chatOverlay, chatOpen, hasChat {
+                let width = min(330, layout.size.width * 0.4)
                 OverlayChat(chat: playback.chat)
-                    // Abajo a la izquierda, por encima de la barra de progreso
-                    .frame(width: min(330, layout.size.width * 0.4), height: layout.size.height * 0.6)
-                    .offset(x: max(layout.insets.leading, 16) - layout.insets.leading,
-                            y: layout.size.height * 0.4 - max(layout.insets.bottom, 6) - 52)
-                    .opacity(1 - layout.progress * 2.5)
+                    // Abajo, en el lado elegido, por encima de la barra de progreso
+                    .frame(width: width, height: layout.size.height * 0.6)
+                    .offset(x: overlayTrailing
+                                ? layout.size.width + layout.insets.trailing - max(layout.insets.trailing, 16) - width
+                                : max(layout.insets.leading, 16) - layout.insets.leading,
+                            y: layout.size.height * 0.4 - max(layout.insets.bottom, 6) - 44)
+                    .opacity(overlayOpacity * (1 - layout.progress * 2.5))
                     .transition(.opacity)
             }
 

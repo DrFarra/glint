@@ -45,6 +45,7 @@ struct PlayerControls: View {
     /// Brillo o volumen que se está cambiando con el dedo (y su indicador, que dura un poco más).
     @State private var level: Level?
     @State private var levelTask: Task<Void, Never>?
+    @AppStorage("levelGestures") private var levelGestures = true
 
     private struct Jump: Equatable {
         var forward: Bool
@@ -205,7 +206,7 @@ struct PlayerControls: View {
             level = nil
             // Por los laterales, en vertical: brillo a la izquierda, volumen a la derecha.
             // Por el centro sigue siendo salir de pantalla completa.
-            if panAxis == .vertical, landscape, active {
+            if panAxis == .vertical, landscape, active, levelGestures {
                 let x = g.startLocation.x / max(width, 1)
                 if x < 1 / 3 {
                     let now = Float(SystemVolume.screen?.brightness ?? 0.5)

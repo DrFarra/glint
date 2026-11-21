@@ -12,10 +12,11 @@ struct ChatView: View {
     @State private var phase: ScrollPhase = .idle
     @State private var atNewest = true
     @State private var replyTo: ChatMessage?
+    @AppStorage("chatTextSize") private var textSize = ChatTextSize.normal
 
     var body: some View {
         VStack(spacing: 0) {
-            list
+            list.chatTextSize(textSize)
             // Solo en directo se puede escribir; en un VOD el chat es la repetición
             if chat.channel != nil {
                 ChatComposer(chat: chat, replyTo: $replyTo)
@@ -99,6 +100,7 @@ struct ChatView: View {
 /// sitio que ocupa en la lista, así que ni el scroll ni los toques notan nada.
 struct ChatArrival: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("chatAnimation") private var enabled = true
     @State private var settled: Bool
 
     init(shownAt: Date?) {
@@ -107,10 +109,11 @@ struct ChatArrival: ViewModifier {
     }
 
     func body(content: Content) -> some View {
+        let still = settled || !enabled
         content
-            .opacity(settled ? 1 : 0)
-            .offset(y: settled || reduceMotion ? 0 : 14)
-            .scaleEffect(settled || reduceMotion ? 1 : 0.94, anchor: .bottomLeading)
+            .opacity(still ? 1 : 0)
+            .offset(y: still || reduceMotion ? 0 : 14)
+            .scaleEffect(still || reduceMotion ? 1 : 0.94, anchor: .bottomLeading)
             .onAppear {
                 guard !settled else { return }
                 withAnimation(.spring(duration: 0.4, bounce: 0.3)) { settled = true }
@@ -123,25 +126,34 @@ struct ChatArrival: ViewModifier {
 struct OverlayChat: View {
     let chat: ChatClient
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("chatTextSize") private var textSize = ChatTextSize.normal
+    @AppStorage("chatAnimation") private var animate = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            ForEach(chat.messages.suffix(14)) { message in
-                ChatRow(message: message)
-                    .modifier(ChatArrival(shownAt: message.shownAt))
-                    .transition(.opacity)
+        // El hueco tiene un tamaño fijo y los mensajes cuelgan de su borde de abajo: lo que no
+        // cabe sobresale por arriba y lo corta la máscara (un marco flexible lo centraría)
+        Color.clear
+            .overlay(alignment: .bottomLeading) {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(chat.messages.suffix(14)) { message in
+                        ChatRow(message: message)
+                            .modifier(ChatArrival(shownAt: message.shownAt))
+                            .transition(.opacity)
+                    }
+                }
+                // Cada mensaje con su altura entera, sin recortar emotes para que quepa todo
+                .fixedSize(horizontal: false, vertical: true)
+                // Aquí no hay scroll que descolocar: los de arriba suben con suavidad
+                .animation(reduceMotion || !animate ? nil : .snappy(duration: 0.3), value: chat.messages.last?.id)
+                .chatTextSize(textSize)
+                .environment(\.colorScheme, .dark)
+                // Una sola sombra para todo el bloque: se lee sobre cualquier imagen y cuesta poco
+                .compositingGroup()
+                .shadow(color: .black.opacity(0.9), radius: 1.5)
+                .shadow(color: .black.opacity(0.5), radius: 6)
             }
-        }
-        // Aquí no hay scroll que descolocar: los de arriba suben con suavidad
-        .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: chat.messages.last?.id)
-        .frame(maxHeight: .infinity, alignment: .bottomLeading)
-        .environment(\.colorScheme, .dark)
-        // Una sola sombra para todo el bloque: se lee sobre cualquier imagen y cuesta poco
-        .compositingGroup()
-        .shadow(color: .black.opacity(0.9), radius: 1.5)
-        .shadow(color: .black.opacity(0.5), radius: 6)
-        .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.35)],
-                             startPoint: .top, endPoint: .bottom))
+            .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.35)],
+                                 startPoint: .top, endPoint: .bottom))
         .allowsHitTesting(false)
         .accessibilityHidden(true)
         // Si el chat lateral quedó en pausa, aquí no hay forma de reanudarlo

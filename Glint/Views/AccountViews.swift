@@ -84,6 +84,11 @@ struct AccountView: View {
                         Section { Text(failure).foregroundStyle(Color.live) }
                     }
                 }
+                Section {
+                    NavigationLink { SettingsView() } label: {
+                        Label("Ajustes", systemImage: "slider.horizontal.3")
+                    }
+                }
             }
             .navigationTitle("Cuenta")
             .navigationBarTitleDisplayMode(.inline)
