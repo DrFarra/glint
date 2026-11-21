@@ -229,10 +229,16 @@ enum Twitch {
             query($id: ID!) { video(id: $id) { muteInfo { mutedSegmentConnection { nodes { duration offset } } } } }
             """, ["id": id])
         let nodes = (r.video?.muteInfo?.mutedSegmentConnection?.nodes ?? []).sorted { ($0.offset ?? 0) < ($1.offset ?? 0) }
+        return merged(nodes.compactMap { node in
+            guard let offset = node.offset, let duration = node.duration, duration > 0 else { return nil }
+            return Double(offset)..<Double(offset + duration)
+        })
+    }
+
+    /// Une los tramos (ordenados) que van seguidos o casi.
+    static func merged(_ sorted: [Range<Double>]) -> [Range<Double>] {
         var ranges: [Range<Double>] = []
-        for node in nodes {
-            guard let offset = node.offset, let duration = node.duration, duration > 0 else { continue }
-            let range = Double(offset)..<Double(offset + duration)
+        for range in sorted {
             if let last = ranges.last, range.lowerBound <= last.upperBound + 1 {
                 ranges[ranges.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
             } else {

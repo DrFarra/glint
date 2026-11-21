@@ -30,8 +30,11 @@ final class PlayerEngine {
 
     /// Miniaturas para la barra de un VOD.
     private(set) var storyboard: Storyboard?
-    /// Tramos del VOD con el audio silenciado.
+    /// Tramos del VOD con el audio silenciado (sin contar los que se han podido recuperar).
     private(set) var muted: [Range<Double>] = []
+    /// Recupera el audio original de los VOD; uno por vídeo (ver Unmuter).
+    @ObservationIgnored private var unmuter: Unmuter?
+    @ObservationIgnored private var mutedFromPlaylist = false
 
     /// Tramo silenciado en el que está la reproducción ahora mismo.
     var currentMuted: Range<Double>? {
@@ -96,13 +99,22 @@ final class PlayerEngine {
     func startVOD(id: String, length: Double, at offset: Double? = nil) {
         videoID = id
         clipSlug = nil
+        mutedFromPlaylist = false
+        unmuter = Unmuter { [weak self] ranges in
+            Task { @MainActor in
+                guard let self, self.videoID == id, self.clipSlug == nil else { return }
+                self.mutedFromPlaylist = true
+                self.muted = ranges
+            }
+        }
         Task { [weak self] in
             async let mutedRanges = try? Twitch.mutedSegments(id)
             let board = await Storyboard.load(videoID: id)
             let ranges = await mutedRanges ?? []
-            if self?.videoID == id, self?.clipSlug == nil {
-                self?.storyboard = board
-                self?.muted = ranges
+            if let self, self.videoID == id, self.clipSlug == nil {
+                self.storyboard = board
+                // Lo que dice la lista es más exacto: ya descuenta los tramos con el audio recuperado
+                if !self.mutedFromPlaylist { self.muted = ranges }
             }
         }
         startedAt = nil
@@ -143,6 +155,7 @@ final class PlayerEngine {
         adReconnects = 0
         storyboard = nil
         muted = []
+        unmuter = nil
         player.replaceCurrentItem(with: nil)
         itemObserver = nil
         qualities = []
@@ -232,7 +245,12 @@ final class PlayerEngine {
 
     private func replaceItem(at offset: Double?) async {
         guard let url = streamURL else { return }
-        let item = AVPlayerItem(url: url)
+        let item: AVPlayerItem
+        if mode == .vod, clipSlug == nil, let unmuter {
+            item = AVPlayerItem(asset: unmuter.asset(url))
+        } else {
+            item = AVPlayerItem(url: url)
+        }
         itemObserver = item.observe(\.status) { [weak self] item, _ in
             guard item.status == .failed else { return }
             let message = item.error?.localizedDescription ?? "No se pudo reproducir"
