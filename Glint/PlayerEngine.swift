@@ -156,6 +156,7 @@ final class PlayerEngine {
         storyboard = nil
         muted = []
         unmuter = nil
+        boosted = false
         player.replaceCurrentItem(with: nil)
         itemObserver = nil
         qualities = []
@@ -340,6 +341,16 @@ final class PlayerEngine {
         rate = value
         player.defaultRate = value
         if isPlaying { player.rate = value }
+    }
+
+    /// Mantener pulsado el vídeo: 2× mientras dure, sin cambiar la velocidad elegida.
+    /// En directo no hay nada por delante que adelantar.
+    private(set) var boosted = false
+
+    func setBoost(_ on: Bool) {
+        guard on != boosted, !on || mode != .live else { return }
+        boosted = on
+        if on { player.rate = 2 } else if isPlaying { player.rate = rate }
     }
 
     // MARK: - Imagen y Picture in Picture

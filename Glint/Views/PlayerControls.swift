@@ -46,6 +46,8 @@ struct PlayerControls: View {
     @State private var level: Level?
     @State private var levelTask: Task<Void, Never>?
     @AppStorage("levelGestures") private var levelGestures = true
+    /// Al soltar tras mantener pulsado llega también un toque: ese no debe mostrar los controles.
+    @State private var boostEnded = Date.distantPast
 
     private struct Jump: Equatable {
         var forward: Bool
@@ -72,6 +74,18 @@ struct PlayerControls: View {
                 }
 
                 if active {
+                    if engine.boosted {
+                        Label("2×", systemImage: "forward.fill")
+                            .font(.footnote.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .frame(maxHeight: .infinity, alignment: .top)
+                            .padding(.top, landscape ? max(safe.top, 12) + 44 : 48)
+                            .allowsHitTesting(false)
+                            .transition(.opacity)
+                    }
                     if let level {
                         levelIndicator(level)
                             .frame(maxHeight: .infinity, alignment: .top)
@@ -118,6 +132,8 @@ struct PlayerControls: View {
         .animation(.snappy, value: engine.currentMuted)
         .animation(.easeOut(duration: 0.2), value: engine.skippingAd)
         .animation(.easeOut(duration: 0.2), value: level == nil)
+        .animation(.easeOut(duration: 0.15), value: engine.boosted)
+        .sensoryFeedback(.impact(weight: .medium), trigger: engine.boosted) { _, on in on }
         .sensoryFeedback(.impact(weight: .light), trigger: jump?.seconds)
         .onChange(of: engine.isPlaying) { _, playing in
             if playing { scheduleHide() } else { show(keep: true) }
@@ -141,6 +157,19 @@ struct PlayerControls: View {
                     .onChanged { pan($0, size: size) }
                     .onEnded { endPan($0) }
             )
+            // Mantener pulsado = 2× hasta soltar. Si el dedo se mueve antes, es un arrastre normal
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.45)
+                    .sequenced(before: DragGesture(minimumDistance: 0))
+                    .onChanged { value in
+                        if case .second(true, _) = value, active, message == nil { engine.setBoost(true) }
+                    }
+                    .onEnded { _ in
+                        guard engine.boosted else { return }
+                        engine.setBoost(false)
+                        boostEnded = Date()
+                    }
+            )
             .simultaneousGesture(
                 MagnifyGesture().onEnded { value in
                     withAnimation(.snappy) { engine.fill = value.magnification > 1 }
@@ -152,6 +181,7 @@ struct PlayerControls: View {
     /// toque rápido en un lateral, se deshace eso y se salta 10 s; mientras se ve el
     /// indicador de salto, cada toque más en el mismo lado suma otros 10 s.
     private func tap(at x: CGFloat) {
+        if engine.boosted || Date().timeIntervalSince(boostEnded) < 0.3 { return }
         let zone = x < 0.38 ? -1 : x > 0.62 ? 1 : 0
         let now = Date()
         let isDouble = now.timeIntervalSince(lastTap) < 0.3 && zone == lastTapZone
@@ -197,7 +227,7 @@ struct PlayerControls: View {
            g.startLocation.x > width - 44, -g.translation.width > abs(g.translation.height) {
             edgeSwipe = true
         }
-        if edgeSwipe { return }
+        if edgeSwipe || engine.boosted { return }
         guard active || panAxis == .vertical else { return }
         if panAxis == nil {
             panAxis = abs(g.translation.width) > abs(g.translation.height) ? .horizontal : .vertical
