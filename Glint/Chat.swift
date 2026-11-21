@@ -36,6 +36,9 @@ struct ChatMessage: Identifiable {
     /// Id del mensaje en Twitch (para responderlo o borrarlo) y usuario que lo escribió.
     var ircID: String?
     var login = ""
+    /// Cuándo entró en el chat a su ritmo normal (nil si llegó de golpe: al saltar o al soltar los
+    /// retenidos). Solo esos se animan al aparecer.
+    var shownAt: Date?
 
     var plainText: String {
         parts.map { part in
@@ -494,7 +497,8 @@ final class ChatClient {
             pendingCount = held.count
         } else {
             // Sin animación: con el chat desplazado, una animación movía lo que se estaba leyendo
-            messages += batch
+            let now = Date()
+            messages += batch.map { var message = $0; message.shownAt = now; return message }
             if messages.count > 200 { messages.removeFirst(messages.count - 200) }
         }
     }
@@ -783,6 +787,19 @@ final class EmoteImages {
         for url in urls where !isReady(url) && loading.insert(url).inserted {
             Task { await load(url) }
         }
+    }
+
+    /// Espera a tener la imagen, para las vistas que sí quieren enterarse (el selector de emotes).
+    func loaded(_ url: String) async -> UIImage? {
+        if !isReady(url) {
+            if loading.insert(url).inserted {
+                await load(url)
+            } else {
+                // Ya la está bajando otro: se espera a que acabe
+                while loading.contains(url), !Task.isCancelled { try? await Task.sleep(for: .milliseconds(80)) }
+            }
+        }
+        return image(url)
     }
 
     private func load(_ link: String) async {

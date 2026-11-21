@@ -110,7 +110,8 @@ enum Demo {
                 try? await Task.sleep(for: .seconds(8))
                 playback.engine.togglePlay()
             }
-        case "landscape":
+        case "landscape", "chatoverlay":
+            UserDefaults.standard.set(screen == "chatoverlay", forKey: "chatOverlay")
             if let login {
                 playback.play(.live(login))
                 try? await Task.sleep(for: .seconds(8))

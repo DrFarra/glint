@@ -174,21 +174,22 @@ struct WatchProgress: View {
     }
 }
 
-/// Sin sesión, seguir es local (para Inicio y los avisos). Con sesión, se sigue en la
-/// cuenta de Twitch desde su página (Twitch no deja hacerlo a apps de terceros) y al
-/// volver se comprueba en tu cuenta.
+/// Sin sesión, seguir es local (para Inicio y los avisos). Con sesión, se sigue en tu
+/// cuenta de Twitch directamente; si Twitch no lo aplica (su API oficial ya no deja seguir y
+/// la de su web puede rechazar apps), se abre su página para hacerlo allí.
 struct FollowButton: View {
     let channel: ChannelRef
     var compact = false
     @Environment(Library.self) private var library
     @Environment(Account.self) private var account
     @State private var showTwitch = false
+    @State private var working = false
 
     var body: some View {
         let following = library.isFollowing(channel.login)
         Button {
             if account.isLoggedIn {
-                showTwitch = true
+                Task { await followOnTwitch(!following) }
                 return
             }
             withAnimation(.snappy) { library.toggleFollow(channel) }
@@ -206,6 +207,8 @@ struct FollowButton: View {
                 .contentTransition(.symbolEffect(.replace))
         }
         .buttonStyle(PressStyle())
+        .disabled(working)
+        .opacity(working ? 0.6 : 1)
         .sensoryFeedback(.selection, trigger: following)
         .sheet(isPresented: $showTwitch, onDismiss: { Task { await sync() } }) {
             TwitchWebSheet(title: channel.displayName, url: URL(string: "https://www.twitch.tv/\(channel.login)")!,
@@ -213,6 +216,20 @@ struct FollowButton: View {
                                            : "Toca «Seguir» junto al nombre del canal y luego «Listo».")
         }
         .task(id: account.user?.id) { await sync() }
+    }
+
+    private func followOnTwitch(_ follow: Bool) async {
+        guard let token = account.token else { return }
+        working = true
+        defer { working = false }
+        try? await Twitch.setFollow(channel.login, follow, token: token)
+        // Twitch puede tardar un momento en reflejarlo: se mira dos veces antes de rendirse
+        for attempt in 0..<2 {
+            await sync()
+            if library.isFollowing(channel.login) == follow { return }
+            if attempt == 0 { try? await Task.sleep(for: .seconds(1)) }
+        }
+        showTwitch = true
     }
 
     /// Con sesión, lo que manda es tu cuenta de Twitch.
