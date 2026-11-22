@@ -235,7 +235,7 @@ final class ChatClient {
     }
 
     /// Aviso de Twitch o de la app dentro del chat.
-    private func notice(_ text: String) {
+    func notice(_ text: String) {
         receive(ChatMessage(name: "", color: .secondary, parts: [], isAction: false,
                             kind: .event(.init(style: .notice, text: text))))
     }

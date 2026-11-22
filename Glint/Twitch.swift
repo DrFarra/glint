@@ -581,9 +581,12 @@ enum Twitch {
 
     @MainActor
     static func claimBonus(channelID: String, claimID: String, token: String) async throws {
-        _ = try await TwitchBridge.mutate("""
+        let data = try await TwitchBridge.mutate("""
             mutation($input: ClaimCommunityPointsInput!) { claimCommunityPoints(input: $input) { error { code } } }
             """, ["input": ["channelID": channelID, "claimID": claimID]], token: token)
+        if let code = ((data["claimCommunityPoints"] as? [String: Any])?["error"] as? [String: Any])?["code"] as? String {
+            throw Failure(message: "Twitch no dejó reclamar el cofre (\(code))")
+        }
     }
 
     private static func rewardError(_ code: String) -> String {

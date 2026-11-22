@@ -93,7 +93,12 @@ final class Playback {
               let points = try? await Twitch.points(login, token: token), let claimID = points.claimID else { return }
         try? await Task.sleep(for: .seconds(Double.random(in: 4...40)))
         guard !Task.isCancelled, engine.isPlaying else { return }
-        try? await Twitch.claimBonus(channelID: points.channelID, claimID: claimID, token: token)
+        do {
+            try await Twitch.claimBonus(channelID: points.channelID, claimID: claimID, token: token)
+            chat.notice("Cofre de \(points.name ?? "puntos") reclamado automáticamente.")
+        } catch {
+            chat.notice("No se pudo reclamar el cofre de puntos: \(error.localizedDescription)")
+        }
     }
 
     private func start(_ media: Media) async {
