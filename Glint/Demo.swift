@@ -119,6 +119,14 @@ enum Demo {
                 try? await Task.sleep(for: .seconds(2))
                 playback.engine.togglePlay()
             }
+        case "landscapehidden":
+            // En horizontal, reproduciendo y con los controles ya ocultos: no tiene que quedar nada encima
+            UserDefaults.standard.set(false, forKey: "chatOverlay")
+            if let login {
+                playback.play(.live(login))
+                try? await Task.sleep(for: .seconds(8))
+                Orientation.set(landscape: true)
+            }
         case "mini":
             if let login {
                 playback.play(.live(login))
