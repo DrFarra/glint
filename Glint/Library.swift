@@ -78,7 +78,7 @@ final class Library {
 
     /// Trae los seguidos de tu cuenta de Twitch (al abrir la app, al volver a ella y al recargar Inicio).
     func importFollows(token: String) async {
-        let (channels, tried) = await Twitch.followedChannels(token: token)
+        let (channels, tried) = await Twitch.followedChannels(token: token, userID: Account.shared.user?.id)
         importFollows(channels)
         // Si no llega nada, en Inicio se ve qué pasó con cada forma de pedirlos
         followsProblem = channels.isEmpty ? "No llegaron tus seguidos de Twitch (\(tried.joined(separator: "; ")))." : nil

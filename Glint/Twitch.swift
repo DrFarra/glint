@@ -439,18 +439,22 @@ enum Twitch {
     /// o con "service error": se prueban varias formas, desde la app y desde la web, hasta que una
     /// traiga canales. `tried` dice qué pasó con las que no (se enseña en Inicio).
     @MainActor
-    static func followedChannels(token: String) async -> (channels: [ChannelRef], tried: [String]) {
-        let variants = [
-            ("follows DESC", "follows(first: 100, after: $after, order: DESC, filter: ALL)"),
-            ("follows", "follows(first: 100, after: $after)"),
-            ("en directo", "followedLiveUsers(first: 100)"),
+    static func followedChannels(token: String, userID: String?) async -> (channels: [ChannelRef], tried: [String]) {
+        let me = "currentUser"
+        // Con tu id en vez de currentUser, por si Twitch lo resuelve distinto (mismo nombre, así se lee igual)
+        let byID = "currentUser: user(id: $id)"
+        var variants = [
+            ("follows DESC", me, "follows(first: 100, after: $after, order: DESC, filter: ALL)"),
+            ("follows", me, "follows(first: 100, after: $after)"),
+            ("en directo", me, "followedLiveUsers(first: 100)"),
         ]
+        if userID != nil { variants.append(("por id", byID, "follows(first: 100, after: $after, order: DESC)")) }
         var tried: [String] = []
-        for (name, field) in variants {
+        for (name, root, field) in variants {
             for viaWeb in [false, true] {
                 let label = "\(name), \(viaWeb ? "web" : "app")"
                 do {
-                    let channels = try await followedChannels(token: token, field: field, viaWeb: viaWeb)
+                    let channels = try await followedChannels(token: token, root: root, field: field, userID: userID, viaWeb: viaWeb)
                     if !channels.isEmpty { return (channels, tried) }
                     tried.append("\(label): vacía")
                 } catch {
@@ -458,11 +462,47 @@ enum Twitch {
                 }
             }
         }
+        if let userID {
+            do {
+                let channels = try await helixFollowed(userID: userID, token: token)
+                if !channels.isEmpty { return (channels, tried) }
+                tried.append("API oficial: vacía")
+            } catch {
+                tried.append("API oficial: \(error.localizedDescription)")
+            }
+        }
         return ([], tried)
     }
 
+    /// API oficial de Twitch (Helix). Necesita que el token tenga permiso para leer tus seguidos.
+    private static func helixFollowed(userID: String, token: String) async throws -> [ChannelRef] {
+        struct Item: Decodable { let broadcaster_login: String; let broadcaster_name: String? }
+        struct Page: Decodable { let cursor: String? }
+        struct R: Decodable { let data: [Item]?; let pagination: Page?; let message: String? }
+        var out: [ChannelRef] = []
+        var after: String?
+        for _ in 0..<5 {
+            var url = URLComponents(string: "https://api.twitch.tv/helix/channels/followed")!
+            url.queryItems = [.init(name: "user_id", value: userID), .init(name: "first", value: "100")]
+                + (after.map { [.init(name: "after", value: $0)] } ?? [])
+            var request = URLRequest(url: url.url!)
+            request.setValue(clientID, forHTTPHeaderField: "Client-Id")
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let r = try JSONDecoder().decode(R.self, from: data)
+            if let status = (response as? HTTPURLResponse)?.statusCode, status != 200 {
+                throw Failure(message: "\(status) \(r.message ?? "")")
+            }
+            out += (r.data ?? []).map { ChannelRef(login: $0.broadcaster_login, displayName: $0.broadcaster_name ?? $0.broadcaster_login) }
+            guard let cursor = r.pagination?.cursor, !cursor.isEmpty else { break }
+            after = cursor
+        }
+        return out
+    }
+
     @MainActor
-    private static func followedChannels(token: String, field: String, viaWeb: Bool) async throws -> [ChannelRef] {
+    private static func followedChannels(token: String, root: String, field: String, userID: String?,
+                                         viaWeb: Bool) async throws -> [ChannelRef] {
         struct Node: Decodable { let login: String; let displayName: String?; let profileImageURL: String? }
         struct Edge: Decodable { let cursor: String?; let node: Node? }
         struct Info: Decodable { let hasNextPage: Bool? }
@@ -470,13 +510,15 @@ enum Twitch {
         struct User: Decodable { let list: List? }
         struct R: Decodable { let currentUser: User? }
         let paged = field.contains("$after")
+        let declared = [paged ? "$after: Cursor" : nil, root.contains("$id") ? "$id: ID!" : nil].compactMap { $0 }
         var out: [ChannelRef] = []
         var after: String?
         for _ in 0..<5 {
             var variables: [String: Any] = [:]
             if let after { variables["after"] = after }
+            if root.contains("$id"), let userID { variables["id"] = userID }
             let text = """
-                query\(paged ? "($after: Cursor)" : "") { currentUser { list: \(field) { \
+                query\(declared.isEmpty ? "" : "(\(declared.joined(separator: ", ")))") { \(root) { list: \(field) { \
                 edges { cursor node { login displayName profileImageURL(width: 70) } } pageInfo { hasNextPage } } } }
                 """
             let r: R
