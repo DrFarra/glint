@@ -85,6 +85,17 @@ final class Playback {
         library?.recordWatch(video, position: engine.position)
     }
 
+    /// Cofre de puntos del canal: se reclama solo, como un clic tuyo y solo mientras lo ves.
+    /// Espera unos segundos al azar: reclamar al instante y siempre igual es lo que delata a un bot.
+    private func claimBonus(_ login: String) async {
+        guard UserDefaults.standard.object(forKey: "autoClaimBonus") as? Bool ?? true, engine.isPlaying,
+              let token = Account.shared.token,
+              let points = try? await Twitch.points(login, token: token), let claimID = points.claimID else { return }
+        try? await Task.sleep(for: .seconds(Double.random(in: 4...40)))
+        guard !Task.isCancelled, engine.isPlaying else { return }
+        try? await Twitch.claimBonus(channelID: points.channelID, claimID: claimID, token: token)
+    }
+
     private func start(_ media: Media) async {
         do {
             switch media {
@@ -108,6 +119,7 @@ final class Playback {
                         self.channel = fresh
                         engine.updateArchive(fresh.stream?.archiveVideo?.id)
                     }
+                    await claimBonus(login)
                 }
             case .video(let id):
                 guard let video = try await Twitch.video(id) else {

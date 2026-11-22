@@ -9,6 +9,7 @@ struct SettingsView: View {
     @AppStorage("chatOverlay") private var chatOverlay = false
     @AppStorage("chatOverlayTrailing") private var overlayTrailing = false
     @AppStorage("chatOverlayOpacity") private var overlayOpacity = 1.0
+    @AppStorage("autoClaimBonus") private var autoClaimBonus = true
 
     var body: some View {
         List {
@@ -18,6 +19,14 @@ struct SettingsView: View {
                 Text("Reproductor")
             } footer: {
                 Text("A pantalla completa, desliza arriba o abajo por el lado izquierdo para el brillo y por el derecho para el volumen.")
+            }
+
+            Section {
+                Toggle("Reclamar el cofre de puntos solo", isOn: $autoClaimBonus)
+            } header: {
+                Text("Puntos del canal")
+            } footer: {
+                Text("Mientras ves un directo con tu cuenta, el cofre se reclama unos segundos después de aparecer, como si lo pulsaras tú.")
             }
 
             Section("Chat") {
