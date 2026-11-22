@@ -71,6 +71,7 @@ struct PlayerControls: View {
                 if landscape {
                     // Con uno en pantalla, iOS no tapa el vídeo con su aviso de volumen
                     SystemVolume.Host().frame(width: 1, height: 1).opacity(0.01).allowsHitTesting(false)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
 
                 if active {
@@ -706,7 +707,11 @@ struct Scrubber: View {
 /// Volumen y brillo del sistema. iOS no tiene API para poner el volumen: solo se puede con el
 /// deslizador de un MPVolumeView (es lo que hacen los reproductores de vídeo conocidos).
 enum SystemVolume {
-    private static let view = MPVolumeView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+    private static let view: MPVolumeView = {
+        let view = MPVolumeView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        view.clipsToBounds = true  // si no, su slider se dibuja entero (casi transparente) en medio del vídeo
+        return view
+    }()
 
     static func set(_ value: Float) {
         (view.subviews.first { $0 is UISlider } as? UISlider)?.value = value
