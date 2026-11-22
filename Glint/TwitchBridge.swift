@@ -78,12 +78,13 @@ enum TwitchBridge {
                                                 .secure: "TRUE", .expires: Date(timeIntervalSinceNow: 30 * 86_400)]) {
             await config.websiteDataStore.httpCookieStore.setCookie(cookie)
         }
-        let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 844), configuration: config)
+        let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 1280, height: 900), configuration: config)
+        // Como Safari de iPhone, Twitch manda a m.twitch.tv, que no tiene la página Siguiendo
+        view.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
         // Fuera de pantalla la web de Twitch no pide la lista (solo carga lo que se dibuja): va detrás
-        // de la app, a tamaño completo y sin recibir toques, así que se dibuja pero no se ve
+        // de la app y sin recibir toques, así que se dibuja pero no se ve
         if let window = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
             .flatMap(\.windows).first(where: \.isKeyWindow) {
-            view.frame = window.bounds
             view.isUserInteractionEnabled = false
             window.insertSubview(view, at: 0)
         }
@@ -108,8 +109,9 @@ enum TwitchBridge {
         let texts = (try? await view.evaluateJavaScript("window.__glintFollows")) as? [String] ?? []
         if texts.isEmpty {
             let ops = (try? await view.evaluateJavaScript("window.__glintOps.filter(Boolean)")) as? [String] ?? []
-            throw Twitch.Failure(message: ops.isEmpty ? "la página no pidió nada a su API"
-                                 : "sin seguidos en \(ops.count) respuestas (\(Set(ops).sorted().joined(separator: ", ")))")
+            let page = [view.url?.host, view.url?.path].compactMap { $0 }.joined()
+            throw Twitch.Failure(message: ops.isEmpty ? "la página \(page) no pidió nada a su API"
+                                 : "sin seguidos en \(ops.count) respuestas de \(page) (\(Set(ops).sorted().joined(separator: ", ")))")
         }
         var out: [ChannelRef] = []
         for text in texts {
