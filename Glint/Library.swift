@@ -70,9 +70,16 @@ final class Library {
     }
 
     /// Añade los seguidos de la cuenta de Twitch que aún no estén (no quita ninguno).
+    /// Van arriba, como los que sigues desde la app: al final pasaban desapercibidos.
     func importFollows(_ channels: [ChannelRef]) {
         let new = channels.filter { !isFollowing($0.login) }
-        if !new.isEmpty { follows += new }
+        if !new.isEmpty { follows = new + follows }
+    }
+
+    /// Trae los seguidos de tu cuenta de Twitch (al abrir la app, al volver a ella y al recargar Inicio).
+    func importFollows(token: String) async {
+        guard let channels = try? await Twitch.followedChannels(token: token) else { return }
+        importFollows(channels)
     }
 
     func addRecent(_ channel: ChannelRef) {
