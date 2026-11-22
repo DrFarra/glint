@@ -23,6 +23,7 @@ struct SettingsView: View {
 
             Section {
                 Toggle("Reclamar el cofre de puntos solo", isOn: $autoClaimBonus)
+                NavigationLink("Cofres reclamados") { ClaimHistoryView() }
             } header: {
                 Text("Puntos del canal")
             } footer: {
@@ -63,6 +64,46 @@ struct SettingsView: View {
         }
         .animation(.snappy, value: chatOverlay)
         .navigationTitle("Ajustes")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// Historial de los cofres de puntos que se reclamaron solos.
+struct ClaimHistoryView: View {
+    @Environment(Library.self) private var library
+
+    var body: some View {
+        List(library.claims) { claim in
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(claim.channel).font(.subheadline.weight(.medium))
+                    Text(claim.date.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let error = claim.error {
+                        Text(error).font(.caption).foregroundStyle(.red)
+                    }
+                }
+                Spacer()
+                if claim.error == nil {
+                    Text(claim.gained.map { "+\(Format.count($0))" } ?? "✓")
+                        .font(.subheadline.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.glint)
+                }
+            }
+        }
+        .overlay {
+            if library.claims.isEmpty {
+                ContentUnavailableView("Sin cofres todavía", systemImage: "gift",
+                                       description: Text("Aparecerán aquí cuando se reclame alguno mientras ves un directo."))
+            }
+        }
+        .toolbar {
+            if !library.claims.isEmpty {
+                Button("Borrar") { library.clearClaims() }
+            }
+        }
+        .navigationTitle("Cofres reclamados")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

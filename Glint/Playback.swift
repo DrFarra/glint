@@ -93,11 +93,17 @@ final class Playback {
               let points = try? await Twitch.points(login, token: token), let claimID = points.claimID else { return }
         try? await Task.sleep(for: .seconds(Double.random(in: 4...40)))
         guard !Task.isCancelled, engine.isPlaying else { return }
+        let channelName = channel?.name ?? login
         do {
             try await Twitch.claimBonus(channelID: points.channelID, claimID: claimID, token: token)
             chat.notice("Cofre de \(points.name ?? "puntos") reclamado automáticamente.")
+            // Aproximado: el saldo también sube solo por ver el directo
+            let after = await Twitch.pointsBalance(login, token: token)
+            let gained = after.flatMap { a in points.balance.map { a - $0 } }.flatMap { $0 > 0 ? $0 : nil }
+            library?.recordClaim(BonusClaim(channel: channelName, date: .now, gained: gained, error: nil))
         } catch {
             chat.notice("No se pudo reclamar el cofre de puntos: \(error.localizedDescription)")
+            library?.recordClaim(BonusClaim(channel: channelName, date: .now, gained: nil, error: error.localizedDescription))
         }
     }
 

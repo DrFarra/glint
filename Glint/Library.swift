@@ -24,6 +24,17 @@ struct WatchedVideo: Codable, Identifiable {
     var resumePosition: Double? { position > 10 && position < length - 60 ? position : nil }
 }
 
+/// Cofre de puntos reclamado solo (o el intento fallido, con su motivo).
+struct BonusClaim: Codable, Identifiable {
+    var id = UUID()
+    let channel: String
+    let date: Date
+    /// Lo que subió el saldo al reclamar; nil si no se pudo saber.
+    let gained: Int?
+    /// nil si salió bien.
+    let error: String?
+}
+
 extension Twitch.Channel {
     var ref: ChannelRef { ChannelRef(login: login, displayName: name, avatar: profileImageURL) }
 }
@@ -34,6 +45,15 @@ final class Library {
     private(set) var follows: [ChannelRef] = Library.load("follows") { didSet { Library.save(follows, "follows") } }
     private(set) var recents: [ChannelRef] = Library.load("recentSearches") { didSet { Library.save(recents, "recentSearches") } }
     private(set) var watched: [WatchedVideo] = Library.load("watchedVideos") { didSet { Library.save(watched, "watchedVideos") } }
+    private(set) var claims: [BonusClaim] = Library.load("bonusClaims") { didSet { Library.save(claims, "bonusClaims") } }
+
+    /// Lo más reciente primero; se guardan los últimos 200.
+    func recordClaim(_ claim: BonusClaim) {
+        claims.insert(claim, at: 0)
+        if claims.count > 200 { claims.removeLast(claims.count - 200) }
+    }
+
+    func clearClaims() { claims = [] }
 
     func isFollowing(_ login: String) -> Bool { follows.contains { $0.login == login } }
 
