@@ -38,6 +38,93 @@ enum TwitchBridge {
         return json["data"] as? [String: Any] ?? [:]
     }
 
+    /// Tus seguidos como los ve la web: se abre su página "Siguiendo" en una web invisible y se leen
+    /// las respuestas de su propia API (a la app, a algunas cuentas Twitch se los da vacíos).
+    /// No se lee el HTML: solo el JSON que pide la página, que cambia mucho menos.
+    static func followedChannels(token: String) async throws -> [ChannelRef] {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        config.mediaTypesRequiringUserActionForPlayback = .all
+        // Antes de que cargue la página: guarda cada respuesta de su API que traiga "follows"
+        config.userContentController.addUserScript(WKUserScript(source: """
+            (() => {
+                window.__glintFollows = [];
+                window.__glintOps = [];
+                const keep = t => {
+                    if (typeof t !== 'string') return;
+                    if (t.includes('"follows"')) window.__glintFollows.push(t);
+                    // Nombre de cada consulta de la página, para el aviso si no aparece la lista
+                    try { [].concat(JSON.parse(t)).forEach(r => r && r.extensions && window.__glintOps.push(r.extensions.operationName)); } catch (e) {}
+                };
+                const originalFetch = window.fetch;
+                window.fetch = async function (...args) {
+                    const response = await originalFetch.apply(this, args);
+                    try {
+                        const url = String((args[0] && args[0].url) || args[0]);
+                        if (url.includes('gql.twitch.tv')) response.clone().text().then(keep);
+                    } catch (e) {}
+                    return response;
+                };
+                // Por si la página pide su API con XMLHttpRequest en vez de fetch
+                const originalOpen = XMLHttpRequest.prototype.open;
+                XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+                    if (String(url).includes('gql.twitch.tv')) this.addEventListener('load', () => keep(this.responseText));
+                    return originalOpen.call(this, method, url, ...rest);
+                };
+            })();
+            """, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page))
+        // Tu sesión en la web (normalmente ya está, de cuando iniciaste sesión)
+        if let cookie = HTTPCookie(properties: [.domain: ".twitch.tv", .path: "/", .name: "auth-token", .value: token,
+                                                .secure: "TRUE", .expires: Date(timeIntervalSinceNow: 30 * 86_400)]) {
+            await config.websiteDataStore.httpCookieStore.setCookie(cookie)
+        }
+        let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 844), configuration: config)
+        view.load(URLRequest(url: URL(string: "https://www.twitch.tv/directory/following/channels")!))
+
+        // Hasta 20 s a que llegue la lista; luego se baja la página para que pida más, mientras crezca
+        var seen = 0
+        var quiet = 0
+        for _ in 0..<40 {
+            try await Task.sleep(for: .milliseconds(500))
+            let count = (try? await view.evaluateJavaScript("window.__glintFollows.length")) as? Int ?? 0
+            guard count > 0 else { continue }
+            quiet = count == seen ? quiet + 1 : 0
+            seen = count
+            if quiet >= 4 { break }
+            _ = try? await view.evaluateJavaScript("window.scrollTo(0, document.body.scrollHeight)")
+        }
+        let texts = (try? await view.evaluateJavaScript("window.__glintFollows")) as? [String] ?? []
+        if texts.isEmpty {
+            let ops = (try? await view.evaluateJavaScript("window.__glintOps.filter(Boolean)")) as? [String] ?? []
+            throw Twitch.Failure(message: ops.isEmpty ? "la página no pidió nada a su API"
+                                 : "sin seguidos en \(ops.count) respuestas (\(Set(ops).sorted().joined(separator: ", ")))")
+        }
+        var out: [ChannelRef] = []
+        for text in texts {
+            if let data = text.data(using: .utf8), let json = try? JSONSerialization.jsonObject(with: data) {
+                collectFollows(json, into: &out)
+            }
+        }
+        var unique = Set<String>()
+        return out.filter { unique.insert($0.login).inserted }
+    }
+
+    /// Busca en la respuesta cualquier `follows { edges { node { login … } } }`, esté donde esté.
+    private static func collectFollows(_ json: Any, into out: inout [ChannelRef]) {
+        if let dict = json as? [String: Any] {
+            if let edges = (dict["follows"] as? [String: Any])?["edges"] as? [[String: Any]] {
+                for case let node as [String: Any] in edges.compactMap({ $0["node"] }) {
+                    guard let login = node["login"] as? String else { continue }
+                    out.append(ChannelRef(login: login, displayName: node["displayName"] as? String ?? login,
+                                          avatar: node["profileImageURL"] as? String))
+                }
+            }
+            for value in dict.values { collectFollows(value, into: &out) }
+        } else if let array = json as? [Any] {
+            for value in array { collectFollows(value, into: &out) }
+        }
+    }
+
     /// La página se carga una vez y se queda viva mientras la app esté abierta.
     private static func page() async -> WKWebView {
         if let view, loading == nil { return view }
