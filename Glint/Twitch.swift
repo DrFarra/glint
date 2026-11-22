@@ -435,23 +435,48 @@ enum Twitch {
         return r.currentUser
     }
 
-    /// Canales que sigue la cuenta (hasta 500). `viaWeb`: desde la página invisible de twitch.tv,
-    /// por si Twitch no se los da a la app directamente.
+    /// Canales que sigue la cuenta (hasta 500). Pedidos como siempre, Twitch los ha dado vacíos
+    /// o con "service error": se prueban varias formas, desde la app y desde la web, hasta que una
+    /// traiga canales. `tried` dice qué pasó con las que no (se enseña en Inicio).
     @MainActor
-    static func followedChannels(token: String, viaWeb: Bool = false) async throws -> [ChannelRef] {
+    static func followedChannels(token: String) async -> (channels: [ChannelRef], tried: [String]) {
+        let variants = [
+            ("follows DESC", "follows(first: 100, after: $after, order: DESC, filter: ALL)"),
+            ("follows", "follows(first: 100, after: $after)"),
+            ("en directo", "followedLiveUsers(first: 100)"),
+        ]
+        var tried: [String] = []
+        for (name, field) in variants {
+            for viaWeb in [false, true] {
+                let label = "\(name), \(viaWeb ? "web" : "app")"
+                do {
+                    let channels = try await followedChannels(token: token, field: field, viaWeb: viaWeb)
+                    if !channels.isEmpty { return (channels, tried) }
+                    tried.append("\(label): vacía")
+                } catch {
+                    tried.append("\(label): \(error.localizedDescription)")
+                }
+            }
+        }
+        return ([], tried)
+    }
+
+    @MainActor
+    private static func followedChannels(token: String, field: String, viaWeb: Bool) async throws -> [ChannelRef] {
         struct Node: Decodable { let login: String; let displayName: String?; let profileImageURL: String? }
         struct Edge: Decodable { let cursor: String?; let node: Node? }
-        struct Info: Decodable { let hasNextPage: Bool }
-        struct Follows: Decodable { let edges: [Edge]; let pageInfo: Info }
-        struct User: Decodable { let follows: Follows? }
+        struct Info: Decodable { let hasNextPage: Bool? }
+        struct List: Decodable { let edges: [Edge]?; let pageInfo: Info? }
+        struct User: Decodable { let list: List? }
         struct R: Decodable { let currentUser: User? }
+        let paged = field.contains("$after")
         var out: [ChannelRef] = []
         var after: String?
         for _ in 0..<5 {
             var variables: [String: Any] = [:]
             if let after { variables["after"] = after }
             let text = """
-                query($after: Cursor) { currentUser { follows(first: 100, after: $after) { \
+                query\(paged ? "($after: Cursor)" : "") { currentUser { list: \(field) { \
                 edges { cursor node { login displayName profileImageURL(width: 70) } } pageInfo { hasNextPage } } } }
                 """
             let r: R
@@ -461,11 +486,12 @@ enum Twitch {
             } else {
                 r = try await query(text, variables, token: token)
             }
-            guard let follows = r.currentUser?.follows else { break }
-            out += follows.edges.compactMap { edge in
+            guard let user = r.currentUser else { throw Failure(message: "Twitch no reconoce tu sesión aquí") }
+            let edges = user.list?.edges ?? []
+            out += edges.compactMap { edge in
                 edge.node.map { ChannelRef(login: $0.login, displayName: $0.displayName ?? $0.login, avatar: $0.profileImageURL) }
             }
-            guard follows.pageInfo.hasNextPage, let cursor = follows.edges.last?.cursor else { break }
+            guard paged, user.list?.pageInfo?.hasNextPage == true, let cursor = edges.last?.cursor else { break }
             after = cursor
         }
         return out

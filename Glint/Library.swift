@@ -78,22 +78,10 @@ final class Library {
 
     /// Trae los seguidos de tu cuenta de Twitch (al abrir la app, al volver a ella y al recargar Inicio).
     func importFollows(token: String) async {
-        // Los dos intentos dejan su motivo: si no llega nada, se enseña en Inicio para saber por qué
-        var reasons: [String] = []
-        for viaWeb in [false, true] {
-            do {
-                let channels = try await Twitch.followedChannels(token: token, viaWeb: viaWeb)
-                if !channels.isEmpty {
-                    importFollows(channels)
-                    followsProblem = nil
-                    return
-                }
-                reasons.append("lista vacía")
-            } catch {
-                reasons.append(error.localizedDescription)
-            }
-        }
-        followsProblem = "No llegaron tus seguidos de Twitch (app: \(reasons[0]); web: \(reasons[1]))."
+        let (channels, tried) = await Twitch.followedChannels(token: token)
+        importFollows(channels)
+        // Si no llega nada, en Inicio se ve qué pasó con cada forma de pedirlos
+        followsProblem = channels.isEmpty ? "No llegaron tus seguidos de Twitch (\(tried.joined(separator: "; ")))." : nil
     }
 
     /// Por qué no llegaron los seguidos de la cuenta (se enseña en Inicio).
