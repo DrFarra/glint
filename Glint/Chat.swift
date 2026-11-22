@@ -89,7 +89,11 @@ final class ChatClient {
     @ObservationIgnored private var pendingSends: [(text: String, reply: ChatMessage?, sent: Date)] = []
     @ObservationIgnored private var userColor: Substring?
     @ObservationIgnored private var userName: String?
-    @ObservationIgnored private var room: [String: String] = [:]
+    private var room: [String: String] = [:]
+    /// Tus insignias en este canal (llegan con USERSTATE); nil hasta entonces.
+    private var badges: Set<String>?
+    /// Twitch dijo que no puedes escribir aquí (baneo, email o teléfono sin verificar).
+    private var refused: String?
     /// Twitch rechazó el token en el chat: se sigue como anónimo hasta volver a iniciar sesión.
     @ObservationIgnored private var authFailed = false
 
@@ -164,6 +168,8 @@ final class ChatClient {
         loop?.cancel()
         socket?.cancel(with: .goingAway, reason: nil)
         pendingSends = []
+        badges = nil
+        refused = nil
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.run(channel)
@@ -243,6 +249,9 @@ final class ChatClient {
         if rest.contains(" USERSTATE #") {
             userColor = tags["color"]
             userName = tags["display-name"].map(Self.unescape)
+            var badges = Set((tags["badges"] ?? "").split(separator: ",").compactMap { $0.split(separator: "/").first.map(String.init) })
+            if tags["mod"] == "1" { badges.insert("moderator") }
+            self.badges = badges
             if let id = tags["id"], !pendingSends.isEmpty {
                 echo(pendingSends.removeFirst(), id: String(id))
             }
@@ -255,6 +264,9 @@ final class ChatClient {
                 return
             }
             if id.hasPrefix("msg_"), !pendingSends.isEmpty { pendingSends.removeFirst() }
+            if ["msg_banned", "msg_verified_email", "msg_requires_verified_phone_number"].contains(id) {
+                refused = Self.translate(notice: id, trailing)
+            }
             if !trailing.isEmpty { notice(Self.translate(notice: id, trailing)) }
         } else if rest.contains(" ROOMSTATE #") {
             for key in ["emote-only", "followers-only", "slow", "subs-only"] {
@@ -279,6 +291,26 @@ final class ChatClient {
         ready.removeAll(where: match)
         staged.removeAll { match($0.message) }
         pendingCount = held.count
+    }
+
+    /// Por qué no puedes escribir aquí, o nil si puedes. Si algo no se sabe aún, nil: mejor
+    /// dejarte intentarlo (Twitch avisará) que esconder la caja por error.
+    /// `followedAt`: nil = no se sabe; `.some(nil)` = no sigues el canal.
+    func writeBlock(followedAt: Date??) -> String? {
+        if let refused { return refused }
+        guard let badges, badges.isDisjoint(with: ["broadcaster", "moderator", "vip", "staff", "admin", "global_mod"]) else {
+            return nil
+        }
+        let subscribed = badges.contains("subscriber") || badges.contains("founder")
+        if room["subs-only"] == "1", !subscribed { return "Solo pueden escribir los suscriptores del canal." }
+        if let minutes = room["followers-only"].flatMap({ Int($0) }), minutes >= 0, !subscribed, let followedAt {
+            guard let since = followedAt else { return "Solo pueden escribir los seguidores del canal." }
+            let left = minutes - Int(-since.timeIntervalSinceNow / 60)
+            if left > 0 {
+                return "Podrás escribir cuando lleves \(Self.duration(minutes: minutes)) siguiendo el canal (te falta \(Self.duration(minutes: left)))."
+            }
+        }
+        return nil
     }
 
     nonisolated static func describe(_ room: [String: String]) -> [String] {
@@ -418,6 +450,8 @@ final class ChatClient {
         authenticated = false
         roomModes = []
         room = [:]
+        badges = nil
+        refused = nil
         pendingSends = []
     }
 

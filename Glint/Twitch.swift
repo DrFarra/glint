@@ -464,14 +464,20 @@ enum Twitch {
 
     /// ¿La cuenta sigue a este canal? nil si no se pudo saber.
     static func isFollowing(_ login: String, token: String) async -> Bool? {
-        struct Follower: Decodable { let followedAt: String? }
+        await followedAt(login, token: token).map { $0 != nil }
+    }
+
+    /// Desde cuándo la cuenta sigue al canal: `.some(nil)` si no lo sigue, nil si no se pudo saber.
+    static func followedAt(_ login: String, token: String) async -> Date?? {
+        struct Follower: Decodable { let followedAt: Date? }
         struct Relation: Decodable { let follower: Follower? }
         struct User: Decodable { let `self`: Relation? }
         struct R: Decodable { let user: User? }
         guard let r: R = try? await query("query($login: String!) { user(login: $login) { self { follower { followedAt } } } }",
                                           ["login": login], token: token),
               let relation = r.user?.`self` else { return nil }
-        return relation.follower != nil
+        // Si sigue pero sin fecha, cuenta como seguidor de siempre: mejor dejar escribir que bloquear por error
+        return .some(relation.follower.map { $0.followedAt ?? .distantPast })
     }
 
     static func emoteSets(token: String) async throws -> [Account.EmoteSet] {

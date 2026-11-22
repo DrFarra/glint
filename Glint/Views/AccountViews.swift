@@ -214,6 +214,8 @@ struct ChatComposer: View {
     @State private var showEmotes = false
     @State private var showPoints = false
     @State private var points: Int?
+    /// Desde cuándo sigues el canal (para el modo solo seguidores); nil = no se sabe.
+    @State private var followedAt: Date?? = nil
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -236,7 +238,18 @@ struct ChatComposer: View {
                     .accessibilityLabel("Cancelar respuesta")
                 }
             }
-            if account.isLoggedIn {
+            if account.isLoggedIn, let reason = chat.writeBlock(followedAt: followedAt) {
+                // Sin caja de texto: si no puedes escribir, que no lo parezca
+                HStack(spacing: 8) {
+                    Label(reason, systemImage: "lock.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    pointsButton
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, 4)
+            } else if account.isLoggedIn {
                 inputRow
             } else {
                 Button { router.showAccount = true } label: {
@@ -262,9 +275,13 @@ struct ChatComposer: View {
             }
         }
         .task(id: "\(chat.channel ?? "")-\(account.user?.id ?? "")") {
+            followedAt = nil
             guard account.isLoggedIn else { return }
-            await account.loadEmotes()
             refreshPoints()
+            if let token = account.token, let channel = chat.channel {
+                followedAt = await Twitch.followedAt(channel, token: token)
+            }
+            await account.loadEmotes()
         }
         .onChange(of: replyTo?.id) { _, id in if id != nil { focused = true } }
     }
@@ -293,17 +310,7 @@ struct ChatComposer: View {
                 }
                 .accessibilityLabel("Ocultar teclado")
             } else if text.isEmpty {
-                Button { showPoints = true } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "star.circle.fill")
-                        if let points { Text(Format.count(points)).monospacedDigit() }
-                    }
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(Color.glint)
-                    .frame(minWidth: 32, minHeight: 36)
-                }
-                .accessibilityLabel(points.map { "\(Format.count($0)) puntos del canal. Puntos, predicciones y encuestas" }
-                                    ?? "Puntos, predicciones y encuestas")
+                pointsButton
             } else {
                 Button(action: send) {
                     Image(systemName: "arrow.up.circle.fill").font(.title2).frame(width: 32, height: 36)
@@ -313,6 +320,20 @@ struct ChatComposer: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    private var pointsButton: some View {
+        Button { showPoints = true } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "star.circle.fill")
+                if let points { Text(Format.count(points)).monospacedDigit() }
+            }
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(Color.glint)
+            .frame(minWidth: 32, minHeight: 36)
+        }
+        .accessibilityLabel(points.map { "\(Format.count($0)) puntos del canal. Puntos, predicciones y encuestas" }
+                            ?? "Puntos, predicciones y encuestas")
     }
 
     private func send() {
