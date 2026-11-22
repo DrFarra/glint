@@ -435,8 +435,10 @@ enum Twitch {
         return r.currentUser
     }
 
-    /// Canales que sigue la cuenta (hasta 500).
-    static func followedChannels(token: String) async throws -> [ChannelRef] {
+    /// Canales que sigue la cuenta (hasta 500). `viaWeb`: desde la página invisible de twitch.tv,
+    /// por si Twitch no se los da a la app directamente.
+    @MainActor
+    static func followedChannels(token: String, viaWeb: Bool = false) async throws -> [ChannelRef] {
         struct Node: Decodable { let login: String; let displayName: String?; let profileImageURL: String? }
         struct Edge: Decodable { let cursor: String?; let node: Node? }
         struct Info: Decodable { let hasNextPage: Bool }
@@ -448,10 +450,17 @@ enum Twitch {
         for _ in 0..<5 {
             var variables: [String: Any] = [:]
             if let after { variables["after"] = after }
-            let r: R = try await query("""
+            let text = """
                 query($after: Cursor) { currentUser { follows(first: 100, after: $after) { \
                 edges { cursor node { login displayName profileImageURL(width: 70) } } pageInfo { hasNextPage } } } }
-                """, variables, token: token)
+                """
+            let r: R
+            if viaWeb {
+                let data = try await TwitchBridge.mutate(text, variables, token: token)
+                r = try decoder.decode(R.self, from: JSONSerialization.data(withJSONObject: data))
+            } else {
+                r = try await query(text, variables, token: token)
+            }
             guard let follows = r.currentUser?.follows else { break }
             out += follows.edges.compactMap { edge in
                 edge.node.map { ChannelRef(login: $0.login, displayName: $0.displayName ?? $0.login, avatar: $0.profileImageURL) }

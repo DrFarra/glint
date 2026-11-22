@@ -18,6 +18,10 @@ struct HomeView: View {
             LazyVStack(alignment: .leading, spacing: 28) {
                 if !library.follows.isEmpty {
                     followingSection
+                } else if account.isLoggedIn, let problem = library.followsProblem {
+                    Label(problem, systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
 
                 if !library.watched.isEmpty {
