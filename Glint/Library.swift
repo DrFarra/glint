@@ -77,12 +77,21 @@ final class Library {
     }
 
     /// Trae los seguidos de tu cuenta de Twitch (al abrir la app, al volver a ella y al recargar Inicio).
+    /// En una tarea propia: SwiftUI cancelaba la de recargar a mitad, y la vía web tarda segundos.
+    /// Si ya hay una en marcha, se espera a esa en vez de lanzar otra.
     func importFollows(token: String) async {
-        let (channels, tried) = await Twitch.followedChannels(token: token)
-        importFollows(channels)
-        // Si no llega nada, en Inicio se ve qué pasó con cada forma de pedirlos
-        followsProblem = channels.isEmpty ? "No llegaron tus seguidos de Twitch (\(tried.joined(separator: "; ")))." : nil
+        let task = importing ?? Task {
+            let (channels, tried) = await Twitch.followedChannels(token: token)
+            importFollows(channels)
+            // Si no llega nada, en Inicio se ve qué pasó con cada forma de pedirlos
+            followsProblem = channels.isEmpty ? "No llegaron tus seguidos de Twitch (\(tried.joined(separator: "; ")))." : nil
+        }
+        importing = task
+        await task.value
+        if importing == task { importing = nil }
     }
+
+    @ObservationIgnored private var importing: Task<Void, Never>?
 
     /// Por qué no llegaron los seguidos de la cuenta (se enseña en Inicio).
     private(set) var followsProblem: String?

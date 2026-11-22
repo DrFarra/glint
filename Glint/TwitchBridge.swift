@@ -79,19 +79,31 @@ enum TwitchBridge {
             await config.websiteDataStore.httpCookieStore.setCookie(cookie)
         }
         let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 844), configuration: config)
+        // Fuera de pantalla la web de Twitch no pide la lista (solo carga lo que se dibuja): va detrás
+        // de la app, a tamaño completo y sin recibir toques, así que se dibuja pero no se ve
+        if let window = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows).first(where: \.isKeyWindow) {
+            view.frame = window.bounds
+            view.isUserInteractionEnabled = false
+            window.insertSubview(view, at: 0)
+        }
+        defer { view.removeFromSuperview() }
         view.load(URLRequest(url: URL(string: "https://www.twitch.tv/directory/following/channels")!))
 
-        // Hasta 20 s a que llegue la lista; luego se baja la página para que pida más, mientras crezca
+        // Hasta 20 s; se bajan todas las zonas con scroll para que pida más, hasta que la lista deje de crecer
         var seen = 0
         var quiet = 0
         for _ in 0..<40 {
             try await Task.sleep(for: .milliseconds(500))
+            _ = try? await view.evaluateJavaScript("""
+                document.querySelectorAll('*').forEach(e => { if (e.scrollHeight > e.clientHeight + 50) e.scrollTop = e.scrollHeight; });
+                window.scrollTo(0, document.body.scrollHeight); 0
+                """)
             let count = (try? await view.evaluateJavaScript("window.__glintFollows.length")) as? Int ?? 0
             guard count > 0 else { continue }
             quiet = count == seen ? quiet + 1 : 0
             seen = count
             if quiet >= 4 { break }
-            _ = try? await view.evaluateJavaScript("window.scrollTo(0, document.body.scrollHeight)")
         }
         let texts = (try? await view.evaluateJavaScript("window.__glintFollows")) as? [String] ?? []
         if texts.isEmpty {
