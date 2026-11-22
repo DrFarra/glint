@@ -97,6 +97,7 @@ enum Twitch {
     }
 
     struct Comment: Decodable {
+        let id: String?
         let contentOffsetSeconds: Int?
         let commenter: Broadcaster?
         let message: Body?
@@ -301,7 +302,7 @@ enum Twitch {
 
     // MARK: - Chat de los VOD
 
-    /// Mensajes del chat de un VOD desde un segundo dado (Twitch devuelve una página de ~1 minuto).
+    /// Mensajes del chat de un VOD cerca de un segundo dado: ~60 mensajes, empezando unos segundos *antes*.
     static func comments(video id: String, at offset: Int) async throws -> (comments: [Comment], more: Bool) {
         struct P: Decodable { let hasNextPage: Bool? }
         struct C: Decodable { let edges: [Connection<Comment>.Edge]?; let pageInfo: P? }
@@ -309,7 +310,7 @@ enum Twitch {
         struct R: Decodable { let video: V? }
         let r: R = try await query("""
             query($id: ID!, $t: Int) { video(id: $id) { comments(contentOffsetSeconds: $t) { edges { node { \
-            contentOffsetSeconds commenter { login displayName } \
+            id contentOffsetSeconds commenter { login displayName } \
             message { userColor fragments { text emote { emoteID } } } } } pageInfo { hasNextPage } } } }
             """, ["id": id, "t": offset])
         let comments = r.video?.comments

@@ -325,6 +325,7 @@ final class ChatClient {
         loop = Task { [weak self] in
             var queue: [(time: Double, message: ChatMessage)] = []
             var cursor = 0.0, fetchedUntil = -1.0, last = -100.0
+            var edge: Set<String> = []  // ids ya pedidos del segundo fetchedUntil
             var finished = false, jumped = false
             var jumpDeadline: Date?
             // Los mensajes se convierten a emotes al pedirlos: primero hace falta la lista de emotes
@@ -341,6 +342,7 @@ final class ChatClient {
                     queue = []
                     cursor = max(0, now - 20)
                     fetchedUntil = cursor - 1
+                    edge = []
                     finished = false
                     jumped = true
                     jumpDeadline = nil
@@ -348,17 +350,26 @@ final class ChatClient {
                 last = now
                 if !finished, fetchedUntil < now + 30,
                    let page = try? await Twitch.comments(video: videoID, at: Int(cursor)) {
-                    let fresh = page.comments.filter { Double($0.contentOffsetSeconds ?? 0) > fetchedUntil }
+                    // La página empieza antes del segundo pedido: lo del borde se separa por id
+                    let fresh = page.comments.filter { comment in
+                        let time = Double(comment.contentOffsetSeconds ?? 0)
+                        return time > fetchedUntil || time == fetchedUntil && !edge.contains(comment.id ?? "")
+                    }
                     let items = fresh.map { (time: Double($0.contentOffsetSeconds ?? 0), message: message(from: $0)) }
                     for item in items { EmoteImages.shared.prefetch(item.message.emoteURLs) }
                     queue += items
-                    if let end = fresh.last?.contentOffsetSeconds {
-                        fetchedUntil = Double(end)
-                        cursor = fetchedUntil + 1
-                    } else if page.more {
+                    if let end = items.last?.time {
+                        if end > fetchedUntil { edge = [] }
+                        edge.formUnion(fresh.filter { Double($0.contentOffsetSeconds ?? 0) == end }.compactMap(\.id))
+                        fetchedUntil = end
+                        cursor = end + 1
+                    } else if !page.more {
+                        finished = true
+                    } else if page.comments.isEmpty {
                         cursor += 30
                     } else {
-                        finished = true
+                        // Con mucho chat la página entera puede quedar por detrás: saltar 30 s dejaba un hueco
+                        cursor += 1
                     }
                 }
                 let due = queue.prefix { $0.time <= now }.count
