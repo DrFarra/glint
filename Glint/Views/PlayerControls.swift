@@ -351,8 +351,11 @@ struct PlayerControls: View {
             .padding(.trailing, landscape && !chatBeside ? max(safe.trailing, 12) : 4)
 
             if message == nil {
-                centerButtons
-                    .opacity(scrub == nil ? 1 : 0)
+                // Fuera de la vista y no con opacidad 0: el cristal del botón seguía viéndose como una lente
+                if visible && scrub == nil {
+                    centerButtons
+                        .transition(.opacity)
+                }
                 if let scrub, engine.storyboard == nil {
                     scrubReadout(scrub)
                 }
@@ -414,8 +417,7 @@ struct PlayerControls: View {
                     }
                 }
                 .frame(width: 68, height: 68)
-                // El cristal no respeta la opacidad 0 de los controles ocultos: dejaba una lente en medio del vídeo
-                .glassEffect(visible && scrub == nil ? .regular.tint(.black.opacity(0.3)).interactive() : .identity, in: Circle())
+                .glassEffect(.regular.tint(.black.opacity(0.3)).interactive(), in: Circle())
             }
             .accessibilityLabel(engine.isPlaying ? "Pausa" : "Reproducir")
             skipButton(forward: true)

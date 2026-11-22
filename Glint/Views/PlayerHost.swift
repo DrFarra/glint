@@ -88,7 +88,10 @@ struct PlayerHost: View {
                     .allowsHitTesting(full)
             }
 
-            miniCard(layout)
+            // Su cristal no respeta la opacidad 0: a pantalla completa no se dibuja
+            if layout.progress > 0 {
+                miniCard(layout)
+            }
 
             VideoSurface(engine: playback.engine)
                 .frame(width: layout.video.width, height: layout.video.height)
