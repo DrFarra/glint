@@ -244,6 +244,7 @@ struct ChatComposer: View {
                 .buttonStyle(.plain)
                 .padding(.vertical, 4)
             } else if account.isLoggedIn {
+                if !suggestions.isEmpty { suggestionBar }
                 inputRow
             } else {
                 Button { router.showAccount = true } label: {
@@ -314,6 +315,49 @@ struct ChatComposer: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    /// Lo que se está escribiendo: la última palabra.
+    private var lastWord: Substring { text.split(separator: " ", omittingEmptySubsequences: false).last ?? "" }
+
+    /// Autocompletar como en la app de Twitch: emotes por su nombre y "@" + gente que ha escrito.
+    private var suggestions: [(name: String, url: String?)] {
+        let word = lastWord.lowercased()
+        guard word.count >= 2 else { return [] }
+        if word.hasPrefix("@") {
+            let prefix = word.dropFirst()
+            var seen = Set<String>()
+            return chat.messages.reversed().compactMap { message -> (name: String, url: String?)? in
+                guard !message.login.isEmpty, message.login.hasPrefix(prefix), seen.insert(message.login).inserted else { return nil }
+                return (name: "@\(message.name)", url: nil)
+            }.prefix(8).map { $0 }
+        }
+        let emotes = chat.channelEmotes + account.emoteSets.flatMap { set in set.emotes.map { (name: $0.token, url: $0.url) } }
+        var seen = Set<String>()
+        return emotes.filter { $0.name.lowercased().hasPrefix(word) && seen.insert($0.name).inserted }
+            .prefix(12).map { (name: $0.name, url: Optional($0.url)) }
+    }
+
+    private var suggestionBar: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(suggestions, id: \.name) { suggestion in
+                    Button {
+                        text = String(text.dropLast(lastWord.count)) + suggestion.name + " "
+                    } label: {
+                        HStack(spacing: 5) {
+                            if let url = suggestion.url { EmoteCell(url: url).frame(width: 24, height: 24) }
+                            Text(suggestion.name).font(.footnote.weight(.medium)).lineLimit(1)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.surface, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
     }
 
     private var pointsButton: some View {
