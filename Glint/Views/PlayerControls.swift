@@ -30,6 +30,8 @@ struct PlayerControls: View {
     let onRetry: () -> Void
     let onDrag: (CGFloat) -> Void
     let onDragEnd: (CGFloat, CGFloat) -> Void
+    /// Crear un clip del directo (solo con sesión).
+    var onClip: (() -> Void)?
 
     @State private var visible = true
     @State private var hideTask: Task<Void, Never>?
@@ -394,7 +396,7 @@ struct PlayerControls: View {
             if engine.supportsPiP {
                 icon("pip.enter", label: "Imagen dentro de imagen") { engine.togglePiP() }
             }
-            SettingsMenu(engine: engine, landscape: landscape, hasChat: showsChatToggle)
+            SettingsMenu(engine: engine, landscape: landscape, hasChat: showsChatToggle, onClip: onClip)
             if landscape && showsChatToggle {
                 icon(chatOpen ? "bubble.left.fill" : "bubble.left", label: chatOpen ? "Ocultar chat" : "Mostrar chat") {
                     onToggleChat()
@@ -760,6 +762,7 @@ private struct SettingsMenu: View {
     let engine: PlayerEngine
     let landscape: Bool
     let hasChat: Bool
+    let onClip: (() -> Void)?
     // Sin @AppStorage ni otras propiedades dinámicas: con una, SwiftUI ya no puede saltarse este
     // menú cuando el reproductor se redibuja (cada 0,5 s) y el menú abierto no deja hacer scroll
 
@@ -779,6 +782,16 @@ private struct SettingsMenu: View {
                 } label: {
                     Label("Velocidad", systemImage: "gauge.with.dots.needle.67percent")
                 }
+            }
+            // La app de Twitch no lo tiene: pausa sola al cabo de un rato
+            Picker(selection: Binding(get: { engine.sleepMinutes }, set: { engine.setSleep(minutes: $0) })) {
+                Text("Desactivado").tag(0)
+                ForEach([15, 30, 45, 60, 90], id: \.self) { Text("\($0) min").tag($0) }
+            } label: {
+                Label("Temporizador", systemImage: engine.sleepMinutes > 0 ? "moon.zzz.fill" : "moon.zzz")
+            }
+            if let onClip {
+                Button(action: onClip) { Label("Crear clip", systemImage: "scissors") }
             }
             if landscape {
                 Toggle(isOn: Binding(get: { engine.fill }, set: { value in withAnimation { engine.fill = value } })) {

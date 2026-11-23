@@ -597,6 +597,61 @@ enum Twitch {
         return r?.user
     }
 
+    // MARK: - Canal: "Acerca de" y horario
+
+    struct Panel: Decodable, Identifiable {
+        let id: String
+        let title: String?
+        let imageURL: String?
+        let linkURL: String?
+        let description: String?
+    }
+
+    struct ScheduleSegment: Decodable, Identifiable {
+        let startAt: Date?
+        let endAt: Date?
+        let title: String?
+        let categories: [Game]?
+        var id: String { "\(startAt?.timeIntervalSince1970 ?? 0)-\(title ?? "")" }
+        struct Game: Decodable { let displayName: String? }
+    }
+
+    /// Paneles de "Acerca de" y próximas emisiones del horario del canal.
+    static func channelAbout(_ login: String) async -> (panels: [Panel], schedule: [ScheduleSegment]) {
+        struct Schedule: Decodable { let segments: [ScheduleSegment]? }
+        struct C: Decodable { let schedule: Schedule? }
+        struct U: Decodable { let panels: [Panel?]?; let channel: C? }
+        struct R: Decodable { let user: U? }
+        guard let r: R = try? await query("""
+            query($login: String!) { user(login: $login) { \
+            panels { id ... on DefaultPanel { title imageURL linkURL description } } \
+            channel { schedule { segments { startAt endAt title categories { displayName } } } } } }
+            """, ["login": login]) else { return ([], []) }
+        let panels = (r.user?.panels ?? []).compactMap { $0 }.filter { $0.imageURL != nil || $0.description?.isEmpty == false }
+        let upcoming = (r.user?.channel?.schedule?.segments ?? []).filter { ($0.endAt ?? .distantFuture) > .now }
+        return (panels, Array(upcoming.prefix(7)))
+    }
+
+    // MARK: - Clips
+
+    /// Crea un clip del directo hasta ese segundo de la emisión y devuelve su editor (para ponerle
+    /// título, como hace la app de Twitch). Va por la web invisible: Twitch lo protege con su antibots.
+    @MainActor
+    static func createClip(broadcasterID: String, offsetSeconds: Int, token: String) async throws -> URL {
+        let data = try await TwitchBridge.mutate("""
+            mutation($input: CreateClipInput!) { createClip(input: $input) { clip { slug } error { code } } }
+            """, ["input": ["broadcasterID": broadcasterID, "offsetSeconds": offsetSeconds]], token: token)
+        let result = data["createClip"] as? [String: Any]
+        if let code = (result?["error"] as? [String: Any])?["code"] as? String {
+            throw Failure(message: "Twitch no dejó crear el clip (\(code))")
+        }
+        guard let slug = (result?["clip"] as? [String: Any])?["slug"] as? String,
+              let url = URL(string: "https://clips.twitch.tv/\(slug)/edit") else {
+            throw Failure(message: "Twitch no devolvió el clip")
+        }
+        return url
+    }
+
     // MARK: - Drops
 
     /// Campaña de drops en curso en tu inventario, como la devuelve Twitch (la API o su web).

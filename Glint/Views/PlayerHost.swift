@@ -34,7 +34,21 @@ struct PlayerHost: View {
             // en mini, la tarjeta no se mueve
             .ignoresSafeArea(playback.minimized || drag != nil ? .keyboard : [])
             .transition(.move(edge: .bottom).combined(with: .opacity))
+            .sheet(item: Binding(get: { playback.clipEditor.map(ClipEditor.init) }, set: { playback.clipEditor = $0?.url })) { editor in
+                TwitchWebSheet(title: "Tu clip", url: editor.url, hint: "Ponle título y publícalo. Lo verás en los clips del canal.")
+            }
+            .alert("No se pudo crear el clip", isPresented: Binding(get: { playback.clipProblem != nil },
+                                                                      set: { if !$0 { playback.clipProblem = nil } })) {
+                Button("Vale", role: .cancel) {}
+            } message: {
+                Text(playback.clipProblem ?? "")
+            }
         }
+    }
+
+    private struct ClipEditor: Identifiable {
+        let url: URL
+        var id: URL { url }
     }
 
     private var viewers: Int? {
@@ -145,7 +159,10 @@ struct PlayerHost: View {
                             drag = nil
                         }
                     }
-                }
+                },
+                // Clips solo del directo y con tu cuenta, como en la app de Twitch
+                onClip: playback.channel?.stream != nil && Account.shared.token != nil
+                    ? { Task { await playback.createClip() } } : nil
             )
             .frame(width: layout.video.width, height: layout.video.height)
             .offset(x: layout.video.minX, y: layout.video.minY)
@@ -370,6 +387,12 @@ struct PlayerDetails: View {
             .contentShape(Rectangle())
             .onTapGesture { withAnimation(.snappy) { expanded.toggle() } }
 
+            if let link = shareURL {
+                ShareLink(item: link) {
+                    Image(systemName: "square.and.arrow.up").font(.body.weight(.semibold)).frame(width: 34, height: 34)
+                }
+                .accessibilityLabel("Compartir")
+            }
             if let ref {
                 FollowButton(channel: ref, compact: true)
             }
@@ -378,9 +401,24 @@ struct PlayerDetails: View {
         .padding(.vertical, 12)
     }
 
+    /// Enlace de lo que se está viendo, para compartir.
+    private var shareURL: URL? {
+        switch playback.media {
+        case .live(let login): URL(string: "https://www.twitch.tv/\(login)")
+        case .video(let id): URL(string: "https://www.twitch.tv/videos/\(id)")
+        case .clip(let slug): URL(string: "https://clips.twitch.tv/\(slug)")
+        case nil: nil
+        }
+    }
+
     private var meta: String {
         if let stream = playback.channel?.stream {
-            return [stream.game?.title, stream.viewersCount.map { "\(Format.count($0)) espectadores" }]
+            // Cuánto lleva en directo, como en la app de Twitch
+            let uptime = stream.createdAt.map { start -> String in
+                let minutes = max(0, Int(-start.timeIntervalSinceNow / 60))
+                return minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) min" : "\(minutes) min"
+            }
+            return [stream.game?.title, stream.viewersCount.map { "\(Format.count($0)) espectadores" }, uptime]
                 .compactMap { $0 }.joined(separator: " · ")
         }
         if let video = playback.video {

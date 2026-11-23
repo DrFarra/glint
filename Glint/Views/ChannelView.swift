@@ -7,6 +7,9 @@ struct ChannelView: View {
     @State private var failure: String?
     @State private var showFullBio = false
     @State private var clips: [Twitch.Clip] = []
+    @State private var panels: [Twitch.Panel] = []
+    @State private var schedule: [Twitch.ScheduleSegment] = []
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         ScrollView {
@@ -20,6 +23,14 @@ struct ChannelView: View {
         }
         .navigationTitle(channel?.name ?? "")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let url = URL(string: "https://www.twitch.tv/\(login)") {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ShareLink(item: url) { Image(systemName: "square.and.arrow.up") }
+                        .accessibilityLabel("Compartir canal")
+                }
+            }
+        }
         .refreshable { await load() }
         .task { if channel == nil { await load() } }
     }
@@ -41,11 +52,39 @@ struct ChannelView: View {
                     .padding(.horizontal, 16)
             }
 
+            if !schedule.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    SectionHeader("Próximas emisiones")
+                    ForEach(schedule) { segment in
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Text(segment.startAt?.formatted(.dateTime.weekday(.abbreviated).day().hour().minute()) ?? "")
+                                .font(.subheadline.weight(.semibold).monospacedDigit())
+                                .frame(width: 110, alignment: .leading)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(segment.title?.isEmpty == false ? segment.title! : "Directo").font(.subheadline).lineLimit(2)
+                                if let game = segment.categories?.first?.displayName {
+                                    Text(game).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+
             let videos = channel.videos?.nodes ?? []
             if !videos.isEmpty {
                 VStack(alignment: .leading, spacing: 14) {
                     SectionHeader("Emisiones anteriores")
                     ForEach(videos) { VideoRow(video: $0) }
+                }
+                .padding(.horizontal, 16)
+            }
+
+            if !panels.isEmpty {
+                VStack(alignment: .leading, spacing: 16) {
+                    SectionHeader("Acerca de")
+                    ForEach(panels) { panelView($0) }
                 }
                 .padding(.horizontal, 16)
             }
@@ -95,11 +134,36 @@ struct ChannelView: View {
         }
     }
 
+    /// Un panel de "Acerca de", como en la web de Twitch: imagen (que lleva al enlace), título y texto.
+    private func panelView(_ panel: Twitch.Panel) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let image = panel.imageURL {
+                AsyncImage(url: URL(string: image)) { $0.resizable().scaledToFit() } placeholder: {
+                    Color.surface.frame(height: 80)
+                }
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .onTapGesture { if let link = panel.linkURL.flatMap(URL.init(string:)) { openURL(link) } }
+            }
+            if let title = panel.title, !title.isEmpty {
+                Text(title).font(.subheadline.weight(.semibold))
+            }
+            if let text = panel.description, !text.isEmpty {
+                // Twitch los escribe en Markdown: así salen los enlaces y las negritas
+                Text((try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private func load() async {
         do {
             async let clipList = try? Twitch.clips(channel: login)
+            async let about = Twitch.channelAbout(login)
             channel = try await Twitch.channel(login, withVideos: true)
             clips = await clipList ?? []
+            (panels, schedule) = await about
             failure = channel == nil ? "Este canal no existe" : nil
         } catch {
             failure = error.localizedDescription

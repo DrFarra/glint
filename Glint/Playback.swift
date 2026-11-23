@@ -24,6 +24,21 @@ final class Playback {
     /// Encima del chat del directo: el mensaje fijado y la predicción en curso.
     private(set) var pinnedMessage: String?
     private(set) var prediction: Twitch.Prediction?
+    /// Editor del clip recién creado (se abre en una hoja) o por qué no se pudo crear.
+    var clipEditor: URL?
+    var clipProblem: String?
+
+    /// Clip de lo último del directo, como el botón de la app de Twitch.
+    func createClip() async {
+        guard let token = Account.shared.token, let id = channel?.userID, let start = channel?.stream?.createdAt else { return }
+        // Lo que se ve va unos segundos por detrás del directo
+        let offset = max(0, Int(Date().timeIntervalSince(start)) - 8)
+        do {
+            clipEditor = try await Twitch.createClip(broadcasterID: id, offsetSeconds: offset, token: token)
+        } catch {
+            clipProblem = error.localizedDescription
+        }
+    }
     let engine = PlayerEngine()
     let chat = ChatClient()
     /// Para el historial de vídeos vistos; lo asigna la vista raíz.

@@ -27,6 +27,21 @@ final class PlayerEngine {
     /// Se está cambiando de conexión para saltarse un anuncio.
     private(set) var skippingAd = false
     var fill = false { didSet { layer?.videoGravity = fill ? .resizeAspectFill : .resizeAspect } }
+    /// Temporizador para dormir: minutos elegidos (0 = desactivado). Al acabar, pausa.
+    private(set) var sleepMinutes = 0
+    @ObservationIgnored private var sleepTask: Task<Void, Never>?
+
+    func setSleep(minutes: Int) {
+        sleepTask?.cancel()
+        sleepMinutes = minutes
+        guard minutes > 0 else { return }
+        sleepTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(minutes * 60))
+            guard !Task.isCancelled, let self else { return }
+            if isPlaying { togglePlay() }
+            sleepMinutes = 0
+        }
+    }
 
     /// Miniaturas para la barra de un VOD.
     private(set) var storyboard: Storyboard?
