@@ -54,8 +54,6 @@ struct AccountView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 4)
-                    }
-                    Section {
                         Button {
                             failure = nil
                             showLogin = true
