@@ -96,7 +96,7 @@ struct PointsView: View {
             }
             .frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 1) {
-                Text(points.balance.map(Format.count) ?? "–")
+                Text(points.balance.map { $0.formatted() } ?? "–")
                     .font(.title2.weight(.bold))
                     .monospacedDigit()
                     .contentTransition(.numericText())
