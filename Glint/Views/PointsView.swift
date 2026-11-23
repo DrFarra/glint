@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Puntos del canal hechos en la app: tu saldo, el cofre de bonificación y las recompensas
-/// de ese canal (cada uno tiene las suyas, con su color e imagen). Predicciones y encuestas
-/// siguen en la web de Twitch.
+/// de ese canal (cada uno tiene las suyas, con su color e imagen), y la predicción o encuesta en
+/// curso, que se apuesta o vota aquí mismo.
 struct PointsView: View {
     let login: String
     @Environment(Account.self) private var account
@@ -16,6 +16,10 @@ struct PointsView: View {
     @State private var showWeb = false
     @State private var bits: Int?
     @State private var showBits = false
+    @State private var prediction: Twitch.Prediction?
+    @State private var poll: Twitch.Poll?
+    @State private var showPrediction = false
+    @State private var showPoll = false
 
     var body: some View {
         NavigationStack {
@@ -40,24 +44,36 @@ struct PointsView: View {
                         ProgressView().frame(maxWidth: .infinity).padding(.top, 60)
                     }
 
-                    // Bits: se usan escribiendo "Cheer100" en el chat; se compran en la web de Twitch
+                    // Predicción y encuesta en curso, en la app (antes abría la web de Twitch)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Predicciones y encuestas").font(.headline)
+                        if let prediction {
+                            Button { showPrediction = true } label: { PredictionBanner(prediction: prediction) }
+                                .buttonStyle(.plain)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        if let poll {
+                            Button { showPoll = true } label: { PollBanner(poll: poll) }
+                                .buttonStyle(.plain)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        if prediction == nil, poll == nil {
+                            Text("Ahora no hay ninguna en este canal. Cuando empiece una, saldrá aquí y encima del chat.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+
+                    // Bits: se gastan aquí escribiendo "Cheer100" en el chat; comprarlos solo se puede
+                    // en la web de Twitch (no deja cobrar desde otras apps)
                     Button { showBits = true } label: {
-                        Label(bits.map { "Tus bits: \($0.formatted()) · Conseguir más" } ?? "Conseguir bits", systemImage: "diamond.fill")
+                        Label(bits.map { "Tienes \($0.formatted()) bits · Comprar (web de Twitch)" } ?? "Comprar bits (web de Twitch)",
+                              systemImage: "diamond.fill")
                             .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
                     }
                     .buttonStyle(.bordered)
                     .tint(Color(red: 0.72, green: 0.52, blue: 1))
-
-                    Button { showWeb = true } label: {
-                        Label("Predicciones y encuestas", systemImage: "chart.bar.xaxis")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.glint)
                 }
                 .padding(16)
             }
@@ -100,6 +116,16 @@ struct PointsView: View {
         }
         .task { await load() }
         .task { if let token = account.token { bits = await Twitch.bitsBalance(token: token) } }
+        .task {
+            (_, prediction, _) = await Twitch.chatExtras(login)
+            if let token = account.token { poll = await Twitch.activePoll(login, token: token) }
+        }
+        .sheet(isPresented: $showPrediction) {
+            if let prediction { PredictionSheet(prediction: prediction).presentationDetents([.medium, .large]) }
+        }
+        .sheet(isPresented: $showPoll) {
+            if let poll { PollSheet(poll: poll).presentationDetents([.medium]) }
+        }
         .sheet(isPresented: $showBits) {
             if let url = URL(string: "https://www.twitch.tv/bits-checkout/select") {
                 TwitchWebSheet(title: "Bits", url: url, hint: "Para usarlos, escribe en el chat Cheer seguido de la cantidad (Cheer100).")

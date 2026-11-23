@@ -20,19 +20,34 @@ struct ChatView: View {
     @State private var profile: String?
     @State private var showPrediction = false
     @State private var showPoll = false
+    /// Mensaje fijado: desplegado entero, u ocultado (hasta que fijen otro distinto).
+    @State private var pinnedExpanded = false
+    @State private var hiddenPinned: String?
 
     var body: some View {
         VStack(spacing: 0) {
             // Como en la app de Twitch: arriba el mensaje fijado y la predicción en curso
             if chat.channel != nil {
-                if let pinned = playback.pinnedMessage {
-                    Label(pinned, systemImage: "pin.fill")
-                        .font(.footnote)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(Color.white.opacity(0.06))
+                if let pinned = playback.pinnedMessage, pinned != hiddenPinned {
+                    // Tocar lo despliega entero (con sus enlaces); la ✕ lo oculta
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "pin.fill").font(.footnote)
+                        Text(Self.linked(pinned))
+                            .font(.footnote)
+                            .lineLimit(pinnedExpanded ? nil : 2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .onTapGesture { withAnimation(.snappy) { pinnedExpanded.toggle() } }
+                        Button { withAnimation(.snappy) { hiddenPinned = pinned } } label: {
+                            Image(systemName: "xmark").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                .frame(width: 24, height: 24)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Ocultar mensaje fijado")
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.06))
                 }
                 if let raid = playback.raidTarget {
                     HStack(spacing: 10) {
@@ -76,6 +91,20 @@ struct ChatView: View {
                 ChatComposer(chat: chat, replyTo: $replyTo)
             }
         }
+    }
+
+    /// Texto con sus enlaces pulsables.
+    static func linked(_ text: String) -> AttributedString {
+        var out = AttributedString(text)
+        let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+        for match in detector?.matches(in: text, range: NSRange(text.startIndex..., in: text)) ?? [] {
+            guard let url = match.url, let range = Range(match.range, in: text),
+                  let lower = AttributedString.Index(range.lowerBound, within: out),
+                  let upper = AttributedString.Index(range.upperBound, within: out) else { continue }
+            out[lower..<upper].link = url
+            out[lower..<upper].underlineStyle = .single
+        }
+        return out
     }
 
     private var list: some View {
