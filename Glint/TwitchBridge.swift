@@ -38,21 +38,31 @@ enum TwitchBridge {
         return json["data"] as? [String: Any] ?? [:]
     }
 
-    /// Tus seguidos como los ve la web: se abre su página "Siguiendo" en una web invisible y se leen
-    /// las respuestas de su propia API (a la app, a algunas cuentas Twitch se los da vacíos).
-    /// No se lee el HTML: solo el JSON que pide la página, que cambia mucho menos.
+    /// Tus seguidos como los ve la web (a la app, a algunas cuentas Twitch se los da vacíos).
     static func followedChannels(token: String) async throws -> [ChannelRef] {
+        let responses = try await pageResponses("https://www.twitch.tv/directory/following/channels",
+                                                containing: "follows", what: "seguidos", token: token)
+        var out: [ChannelRef] = []
+        for json in responses { collectFollows(json, into: &out) }
+        var unique = Set<String>()
+        return out.filter { unique.insert($0.login).inserted }
+    }
+
+    /// Las respuestas JSON de su propia API que pide una página de twitch.tv y que traen `key`: se
+    /// abre en una web invisible con tu sesión y se leen esas respuestas. No se lee el HTML, que
+    /// cambia mucho más. `what` es para el aviso si no aparecen.
+    static func pageResponses(_ address: String, containing key: String, what: String, token: String) async throws -> [Any] {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.mediaTypesRequiringUserActionForPlayback = .all
-        // Antes de que cargue la página: guarda cada respuesta de su API que traiga "follows"
+        // Antes de que cargue la página: guarda cada respuesta de su API que traiga la clave
         config.userContentController.addUserScript(WKUserScript(source: """
             (() => {
-                window.__glintFollows = [];
+                window.__glintHits = [];
                 window.__glintOps = [];
                 const keep = t => {
                     if (typeof t !== 'string') return;
-                    if (t.includes('"follows"')) window.__glintFollows.push(t);
+                    if (t.includes('"\(key)"')) window.__glintHits.push(t);
                     // Nombre de cada consulta de la página, para el aviso si no aparece la lista
                     try { [].concat(JSON.parse(t)).forEach(r => r && r.extensions && window.__glintOps.push(r.extensions.operationName)); } catch (e) {}
                 };
@@ -79,9 +89,9 @@ enum TwitchBridge {
             await config.websiteDataStore.httpCookieStore.setCookie(cookie)
         }
         let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 1280, height: 900), configuration: config)
-        // Como Safari de iPhone, Twitch manda a m.twitch.tv, que no tiene la página Siguiendo
+        // Como Safari de iPhone, Twitch manda a m.twitch.tv, que no tiene estas páginas
         view.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
-        // Fuera de pantalla la web de Twitch no pide la lista (solo carga lo que se dibuja): va detrás
+        // Fuera de pantalla la web de Twitch no pide el contenido (solo carga lo que se dibuja): va detrás
         // de la app y sin recibir toques, así que se dibuja pero no se ve
         if let window = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
             .flatMap(\.windows).first(where: \.isKeyWindow) {
@@ -89,7 +99,7 @@ enum TwitchBridge {
             window.insertSubview(view, at: 0)
         }
         defer { view.removeFromSuperview() }
-        view.load(URLRequest(url: URL(string: "https://www.twitch.tv/directory/following/channels")!))
+        view.load(URLRequest(url: URL(string: address)!))
 
         // Hasta 20 s; se bajan todas las zonas con scroll para que pida más, hasta que la lista deje de crecer
         var seen = 0
@@ -100,27 +110,20 @@ enum TwitchBridge {
                 document.querySelectorAll('*').forEach(e => { if (e.scrollHeight > e.clientHeight + 50) e.scrollTop = e.scrollHeight; });
                 window.scrollTo(0, document.body.scrollHeight); 0
                 """)
-            let count = (try? await view.evaluateJavaScript("window.__glintFollows.length")) as? Int ?? 0
+            let count = (try? await view.evaluateJavaScript("window.__glintHits.length")) as? Int ?? 0
             guard count > 0 else { continue }
             quiet = count == seen ? quiet + 1 : 0
             seen = count
             if quiet >= 4 { break }
         }
-        let texts = (try? await view.evaluateJavaScript("window.__glintFollows")) as? [String] ?? []
+        let texts = (try? await view.evaluateJavaScript("window.__glintHits")) as? [String] ?? []
         if texts.isEmpty {
             let ops = (try? await view.evaluateJavaScript("window.__glintOps.filter(Boolean)")) as? [String] ?? []
             let page = [view.url?.host, view.url?.path].compactMap { $0 }.joined()
             throw Twitch.Failure(message: ops.isEmpty ? "la página \(page) no pidió nada a su API"
-                                 : "sin seguidos en \(ops.count) respuestas de \(page) (\(Set(ops).sorted().joined(separator: ", ")))")
+                                 : "sin \(what) en \(ops.count) respuestas de \(page) (\(Set(ops).sorted().joined(separator: ", ")))")
         }
-        var out: [ChannelRef] = []
-        for text in texts {
-            if let data = text.data(using: .utf8), let json = try? JSONSerialization.jsonObject(with: data) {
-                collectFollows(json, into: &out)
-            }
-        }
-        var unique = Set<String>()
-        return out.filter { unique.insert($0.login).inserted }
+        return texts.compactMap { $0.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) } }
     }
 
     /// Busca en la respuesta cualquier `follows { edges { node { login … } } }`, esté donde esté.

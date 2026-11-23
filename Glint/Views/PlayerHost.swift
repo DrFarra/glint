@@ -358,6 +358,13 @@ struct PlayerDetails: View {
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
                     .lineLimit(1)
+                if !playback.liveDrops.isEmpty {
+                    // Como en la app de Twitch: aquí ver el directo suma para esos drops
+                    Label("Drops: \(playback.liveDrops.joined(separator: ", "))", systemImage: "gift.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.glint)
+                        .lineLimit(1)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())

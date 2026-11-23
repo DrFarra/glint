@@ -525,6 +525,88 @@ enum Twitch {
         return out
     }
 
+    // MARK: - Drops
+
+    /// Campaña de drops en curso en tu inventario, como la devuelve Twitch (la API o su web).
+    struct DropCampaign: Decodable, Identifiable {
+        let id: String
+        let name: String?
+        let endAt: Date?
+        let game: Game?
+        let timeBasedDrops: [Drop]?
+
+        struct Game: Decodable { let displayName: String?; let boxArtURL: String? }
+
+        struct Drop: Decodable, Identifiable {
+            let id: String
+            let name: String?
+            let requiredMinutesWatched: Int?
+            let benefitEdges: [Edge]?
+            let `self`: Me?
+
+            struct Edge: Decodable { let benefit: Benefit? }
+            struct Benefit: Decodable { let name: String?; let imageAssetURL: String? }
+            struct Me: Decodable { let currentMinutesWatched: Int?; let isClaimed: Bool?; let dropInstanceID: String? }
+
+            var title: String { benefitEdges?.first?.benefit?.name ?? name ?? "Drop" }
+            var image: URL? { benefitEdges?.first?.benefit?.imageAssetURL.flatMap(URL.init(string:)) }
+            var watched: Int { self.`self`?.currentMinutesWatched ?? 0 }
+            var required: Int { requiredMinutesWatched ?? 0 }
+            var claimed: Bool { self.`self`?.isClaimed ?? false }
+            var progress: Double { required > 0 ? min(1, Double(watched) / Double(required)) : 0 }
+            /// Listo para reclamar: Twitch le da un id de instancia cuando se completa.
+            var claimable: Bool { !claimed && self.`self`?.dropInstanceID != nil && watched >= required }
+        }
+    }
+
+    /// Tus campañas de drops en curso. Si la API no las da (como con los seguidos, a algunas cuentas
+    /// se los da vacíos), se leen de la página de inventario de twitch.tv.
+    @MainActor
+    static func dropsInProgress(token: String) async throws -> [DropCampaign] {
+        struct Inventory: Decodable { let dropCampaignsInProgress: [DropCampaign]? }
+        struct User: Decodable { let inventory: Inventory? }
+        struct R: Decodable { let currentUser: User? }
+        if let r: R = try? await query("""
+            query { currentUser { inventory { dropCampaignsInProgress { id name endAt \
+            game { displayName boxArtURL(width: 80, height: 107) } timeBasedDrops { id name requiredMinutesWatched \
+            benefitEdges { benefit { name imageAssetURL } } self { currentMinutesWatched isClaimed dropInstanceID } } } } } }
+            """, token: token),
+           let campaigns = r.currentUser?.inventory?.dropCampaignsInProgress, !campaigns.isEmpty {
+            return campaigns
+        }
+        let responses = try await TwitchBridge.pageResponses("https://www.twitch.tv/drops/inventory",
+                                                             containing: "dropCampaignsInProgress", what: "drops", token: token)
+        // La respuesta de su web: cualquier "dropCampaignsInProgress", esté donde esté
+        func find(_ json: Any) -> Any? {
+            if let dict = json as? [String: Any] {
+                if let list = dict["dropCampaignsInProgress"] as? [Any] { return list }
+                return dict.values.lazy.compactMap(find).first
+            }
+            return (json as? [Any])?.lazy.compactMap(find).first
+        }
+        guard let list = responses.lazy.compactMap(find).first else { return [] }
+        return try decoder.decode([DropCampaign].self, from: JSONSerialization.data(withJSONObject: list))
+    }
+
+    /// Reclamar un drop completado. Twitch lo protege con su antibots: va por la web invisible.
+    @MainActor
+    static func claimDrop(instanceID: String, token: String) async throws {
+        // Si Twitch lo rechaza, mutate lanza el error; quien llama recarga el inventario para ver el resultado
+        _ = try await TwitchBridge.mutate("""
+            mutation($input: ClaimDropRewardsInput!) { claimDropRewards(input: $input) { status } }
+            """, ["input": ["dropInstanceID": instanceID]], token: token)
+    }
+
+    /// Campañas de drops activas en un canal (se ve sin sesión).
+    static func channelDrops(_ login: String) async -> [String] {
+        struct Campaign: Decodable { let name: String? }
+        struct C: Decodable { let viewerDropCampaigns: [Campaign]? }
+        struct R: Decodable { let channel: C? }
+        let r: R? = try? await query("query($login: String!) { channel(name: $login) { viewerDropCampaigns { name } } }",
+                                     ["login": login])
+        return r?.channel?.viewerDropCampaigns?.compactMap(\.name) ?? []
+    }
+
     /// ¿La cuenta sigue a este canal? nil si no se pudo saber.
     static func isFollowing(_ login: String, token: String) async -> Bool? {
         await followedAt(login, token: token).map { $0 != nil }

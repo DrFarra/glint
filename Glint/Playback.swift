@@ -19,6 +19,8 @@ final class Playback {
     /// Otras emisiones del canal, debajo de un vídeo.
     private(set) var moreVideos: [Twitch.Video] = []
     private(set) var problem: String?
+    /// Campañas de drops activas en el directo que se está viendo.
+    private(set) var liveDrops: [String] = []
     let engine = PlayerEngine()
     let chat = ChatClient()
     /// Para el historial de vídeos vistos; lo asigna la vista raíz.
@@ -78,6 +80,7 @@ final class Playback {
         video = nil
         clip = nil
         moreVideos = []
+        liveDrops = []
     }
 
     private func saveProgress() {
@@ -159,6 +162,7 @@ final class Playback {
                     return
                 }
                 engine.startLive(login: login, startedAt: stream.createdAt, archiveID: stream.archiveVideo?.id)
+                liveDrops = await Twitch.channelDrops(login)
                 // Espectadores, título y categoría al día
                 while !Task.isCancelled {
                     try await Task.sleep(for: .seconds(60))

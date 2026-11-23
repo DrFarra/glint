@@ -44,6 +44,9 @@ struct AccountView: View {
                             }
                         }
                         .padding(.vertical, 4)
+                        NavigationLink { DropsView() } label: {
+                            Label("Drops", systemImage: "gift")
+                        }
                     }
                 } else {
                     Section {
