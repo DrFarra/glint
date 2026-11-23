@@ -25,12 +25,11 @@ struct SettingsView: View {
             Section {
                 Toggle("Reclamar el cofre de puntos solo", isOn: $autoClaimBonus)
                 NavigationLink("Cofres reclamados") { ClaimHistoryView() }
-                if let status = playback.pointsStatus {
-                    // Última comprobación (cada minuto mientras ves un directo): para saber si está funcionando
-                    Label(status, systemImage: "clock")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+                // Última comprobación (cada minuto mientras ves un directo): para saber si está funcionando
+                Label(playback.pointsStatus ?? "Aún sin comprobar: pon un directo con tu cuenta y espera un minuto.",
+                      systemImage: "clock")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             } header: {
                 Text("Puntos del canal")
             } footer: {

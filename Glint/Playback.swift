@@ -92,10 +92,17 @@ final class Playback {
     /// eso no hay puntos por ver ni cofres) y, si hay cofre, lo reclama como un clic tuyo. Espera
     /// unos segundos al azar: reclamar al instante y siempre igual es lo que delata a un bot.
     private func watchAndClaim(_ login: String) async {
-        guard engine.isPlaying, let token = Account.shared.token, let userID = Account.shared.user?.id else { return }
         let channelName = channel?.name ?? login
         var status = [Date.now.formatted(date: .omitted, time: .shortened), channelName]
         defer { pointsStatus = status.joined(separator: " · ") }
+        guard let token = Account.shared.token, let userID = Account.shared.user?.id else {
+            status.append("sin sesión: no cuenta")
+            return
+        }
+        guard engine.isPlaying else {
+            status.append("vídeo en pausa: no cuenta")
+            return
+        }
         if let channelID = channel?.userID, let broadcastID = channel?.stream?.id {
             do {
                 try await Twitch.reportWatching(login: login, channelID: channelID, broadcastID: broadcastID,
