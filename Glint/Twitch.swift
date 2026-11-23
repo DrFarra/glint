@@ -553,8 +553,11 @@ enum Twitch {
         let outcomes: [Outcome]
     }
 
-    /// Lo que va encima del chat del directo: el mensaje fijado y la predicción en curso.
-    static func chatExtras(_ login: String) async -> (pinned: String?, prediction: Prediction?) {
+    /// Hype train en marcha: nivel y cuánto falta para el siguiente.
+    struct HypeTrain: Equatable { let level: Int; let progress: Double }
+
+    /// Lo que va encima del chat del directo: el mensaje fijado, la predicción y el hype train.
+    static func chatExtras(_ login: String) async -> (pinned: String?, prediction: Prediction?, hypeTrain: HypeTrain?) {
         struct Sender: Decodable { let displayName: String? }
         struct Content: Decodable { let text: String? }
         struct Pinned: Decodable { let content: Content?; let sender: Sender? }
@@ -563,20 +566,29 @@ enum Twitch {
         struct Pins: Decodable { let edges: [Edge]? }
         struct Outcome: Decodable { let title: String?; let totalPoints: Int? }
         struct Event: Decodable { let title: String?; let status: String?; let outcomes: [Outcome]? }
-        struct C: Decodable { let pinnedChatMessages: Pins?; let activePredictionEvents: [Event]? }
+        struct Level: Decodable { let value: Int? }
+        struct Progress: Decodable { let level: Level?; let progression: Int?; let total: Int? }
+        struct Execution: Decodable { let progress: Progress? }
+        struct Train: Decodable { let execution: Execution? }
+        struct C: Decodable { let pinnedChatMessages: Pins?; let activePredictionEvents: [Event]?; let hypeTrain: Train? }
         struct R: Decodable { let channel: C? }
         guard let r: R = try? await query("""
             query($login: String!) { channel(name: $login) { \
             pinnedChatMessages(first: 1) { edges { node { pinnedMessage { content { text } sender { displayName } } } } } \
-            activePredictionEvents { title status outcomes { title totalPoints } } } }
-            """, ["login": login]) else { return (nil, nil) }
+            activePredictionEvents { title status outcomes { title totalPoints } } \
+            hypeTrain { execution { progress { level { value } progression total } } } } }
+            """, ["login": login]) else { return (nil, nil, nil) }
         let pin = r.channel?.pinnedChatMessages?.edges?.first?.node?.pinnedMessage
         let pinned = pin?.content?.text.map { text in pin?.sender?.displayName.map { "\($0): \(text)" } ?? text }
         let prediction = r.channel?.activePredictionEvents?.first.map { event in
             Prediction(title: event.title ?? "Predicción", locked: event.status == "LOCKED",
                        outcomes: (event.outcomes ?? []).map { .init(title: $0.title ?? "", points: $0.totalPoints ?? 0) })
         }
-        return (pinned, prediction)
+        let train = r.channel?.hypeTrain?.execution?.progress.map { progress in
+            HypeTrain(level: progress.level?.value ?? 1,
+                      progress: Double(progress.progression ?? 0) / Double(max(1, progress.total ?? 1)))
+        }
+        return (pinned, prediction, train)
     }
 
     /// Datos públicos de un usuario del chat (su ficha).

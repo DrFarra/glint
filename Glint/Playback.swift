@@ -24,6 +24,8 @@ final class Playback {
     /// Encima del chat del directo: el mensaje fijado y la predicción en curso.
     private(set) var pinnedMessage: String?
     private(set) var prediction: Twitch.Prediction?
+    private(set) var hypeTrain: Twitch.HypeTrain?
+    @ObservationIgnored private var lastDropsCheck = Date.distantPast
     /// Editor del clip recién creado (se abre en una hoja) o por qué no se pudo crear.
     var clipEditor: URL?
     var clipProblem: String?
@@ -101,6 +103,7 @@ final class Playback {
         liveDrops = []
         pinnedMessage = nil
         prediction = nil
+        hypeTrain = nil
     }
 
     private func saveProgress() {
@@ -166,6 +169,24 @@ final class Playback {
         }
     }
 
+    /// Drops completados del canal que ves: se reclaman solos (la app de Twitch solo avisa). Cada
+    /// 10 min y solo en canales con drops, porque leer el inventario puede abrir la web de Twitch.
+    private func claimDrops() async {
+        guard !liveDrops.isEmpty, engine.isPlaying, UserDefaults.standard.object(forKey: "autoClaimDrops") as? Bool ?? true,
+              let token = Account.shared.token, Date().timeIntervalSince(lastDropsCheck) > 600 else { return }
+        lastDropsCheck = .now
+        guard let campaigns = try? await Twitch.dropsInProgress(token: token) else { return }
+        for drop in campaigns.flatMap({ $0.timeBasedDrops ?? [] }) where drop.claimable {
+            guard let id = drop.`self`?.dropInstanceID else { continue }
+            do {
+                try await Twitch.claimDrop(instanceID: id, token: token)
+                chat.notice("Drop reclamado automáticamente: \(drop.title).")
+            } catch {
+                chat.notice("No se pudo reclamar el drop \(drop.title): \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func start(_ media: Media) async {
         do {
             switch media {
@@ -183,7 +204,7 @@ final class Playback {
                 }
                 engine.startLive(login: login, startedAt: stream.createdAt, archiveID: stream.archiveVideo?.id)
                 liveDrops = await Twitch.channelDrops(login)
-                (pinnedMessage, prediction) = await Twitch.chatExtras(login)
+                (pinnedMessage, prediction, hypeTrain) = await Twitch.chatExtras(login)
                 // Espectadores, título y categoría al día
                 while !Task.isCancelled {
                     try await Task.sleep(for: .seconds(60))
@@ -191,8 +212,9 @@ final class Playback {
                         self.channel = fresh
                         engine.updateArchive(fresh.stream?.archiveVideo?.id)
                     }
-                    (pinnedMessage, prediction) = await Twitch.chatExtras(login)
+                    (pinnedMessage, prediction, hypeTrain) = await Twitch.chatExtras(login)
                     await watchAndClaim(login)
+                    await claimDrops()
                 }
             case .video(let id):
                 guard let video = try await Twitch.video(id) else {

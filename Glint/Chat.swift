@@ -41,6 +41,8 @@ struct ChatMessage: Identifiable {
     var badgeURLs: [String] = []
     /// Cuándo llegó (para la hora junto al mensaje).
     let date = Date()
+    /// Te menciona a ti (se resalta, como en la app de Twitch).
+    var mentionsMe = false
     /// Cuándo entró en el chat a su ritmo normal (nil si llegó de golpe: al saltar o al soltar los
     /// retenidos). Solo esos se animan al aparecer.
     var shownAt: Date?
@@ -518,6 +520,11 @@ final class ChatClient {
 
     /// Mensaje del directo recién llegado, todavía sin emotes de 7TV/BTTV/FFZ.
     private func receive(_ message: ChatMessage) {
+        var message = message
+        if let me = Account.shared.user?.login, message.login != me,
+           message.plainText.lowercased().contains("@\(me)") || message.plainText.lowercased().split(separator: " ").contains(Substring(me)) {
+            message.mentionsMe = true
+        }
         if emotesLoaded {
             stage(expand(message))
         } else {

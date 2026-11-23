@@ -12,6 +12,7 @@ struct SettingsSections: View {
     @AppStorage("chatOverlayTrailing") private var overlayTrailing = false
     @AppStorage("chatOverlayOpacity") private var overlayOpacity = 1.0
     @AppStorage("autoClaimBonus") private var autoClaimBonus = true
+    @AppStorage("autoClaimDrops") private var autoClaimDrops = true
     @Environment(Playback.self) private var playback
     @Environment(Account.self) private var account
 
@@ -28,6 +29,7 @@ struct SettingsSections: View {
         if account.isLoggedIn {
             Section {
                 Toggle("Reclamar el cofre solo", isOn: $autoClaimBonus)
+                Toggle("Reclamar los drops solos", isOn: $autoClaimDrops)
                 NavigationLink("Cofres reclamados") { ClaimHistoryView() }
                 // Última comprobación (cada minuto mientras ves un directo): para saber si está funcionando
                 Label(playback.pointsStatus ?? "Aún sin comprobar: pon un directo y espera un minuto.",

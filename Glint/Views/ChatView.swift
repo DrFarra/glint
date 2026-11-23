@@ -33,6 +33,17 @@ struct ChatView: View {
                         .padding(.vertical, 8)
                         .background(Color.white.opacity(0.06))
                 }
+                if let train = playback.hypeTrain {
+                    HStack(spacing: 10) {
+                        Label("Hype train · nivel \(train.level)", systemImage: "train.side.front.car")
+                            .font(.footnote.weight(.semibold))
+                        ProgressView(value: train.progress).tint(Color(red: 1, green: 0.47, blue: 0.7))
+                        Text("\(Int(train.progress * 100)) %").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color(red: 1, green: 0.47, blue: 0.7).opacity(0.12))
+                }
                 if let prediction = playback.prediction {
                     Button { showPrediction = true } label: { PredictionBanner(prediction: prediction) }
                         .buttonStyle(.plain)
@@ -278,6 +289,13 @@ struct ChatRow: View {
                 .padding(.horizontal, 10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.glint.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        case .normal where message.mentionsMe:
+            // Te mencionan: resaltado, como en la app de Twitch
+            withReply(line.font(.subheadline))
+                .padding(.vertical, 7)
+                .padding(.horizontal, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(red: 1, green: 0.35, blue: 0.35).opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         case .normal:
             withReply(line.font(.subheadline))
         }
