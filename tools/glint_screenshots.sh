@@ -43,6 +43,7 @@ shot chatstyles 16
 shot paused 16
 shot landscape 20
 shot landscapehidden 22
+shot events 22
 shot chatoverlay 24
 shot mini 20
 shot vod 24

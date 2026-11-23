@@ -127,6 +127,13 @@ enum Demo {
                 try? await Task.sleep(for: .seconds(8))
                 Orientation.set(landscape: true)
             }
+        case "events":
+            // Los avisos de encima del chat (raid, fijado, hype train, encuesta, predicción)
+            if let login {
+                playback.play(.live(login))
+                try? await Task.sleep(for: .seconds(10))
+                playback.injectDemoEvents()
+            }
         case "mini":
             if let login {
                 playback.play(.live(login))

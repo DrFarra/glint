@@ -30,6 +30,18 @@ final class Playback {
     private(set) var raidTarget: (login: String, name: String, viewers: Int)?
     @ObservationIgnored private var raidTask: Task<Void, Never>?
 
+    /// Solo para las capturas: los avisos de encima del chat con datos de ejemplo, para ver cómo
+    /// quedan aunque ningún canal tenga ahora una predicción, encuesta, raid o hype train.
+    func injectDemoEvents() {
+        pinnedMessage = "Moderador: el sorteo es a las 22:00, no hace falta seguir para participar"
+        prediction = Twitch.Prediction(id: "demo", title: "¿Gana la partida?", locked: false,
+                                       outcomes: [.init(id: "a", title: "Sí", points: 182_400), .init(id: "b", title: "No", points: 97_150)])
+        poll = Twitch.Poll(id: "demo", title: "¿Qué jugamos después?",
+                           choices: [.init(id: "a", title: "Minecraft", votes: 812), .init(id: "b", title: "GTA VI", votes: 1_405)])
+        hypeTrain = Twitch.HypeTrain(level: 3, progress: 0.62)
+        raidTarget = (login: "auronplay", name: "auronplay", viewers: 41_200)
+    }
+
     /// Ir ya al canal del raid (botón del aviso).
     func followRaid() {
         guard let target = raidTarget?.login else { return }
