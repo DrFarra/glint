@@ -19,6 +19,7 @@ struct ChatView: View {
     /// Ficha del usuario que se está mirando (su login).
     @State private var profile: String?
     @State private var showPrediction = false
+    @State private var showPoll = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,7 +51,7 @@ struct ChatView: View {
                     .background(Color(red: 1, green: 0.62, blue: 0.25).opacity(0.14))
                 }
                 if let poll = playback.poll {
-                    Button { showPrediction = true } label: { PollBanner(poll: poll) }
+                    Button { showPoll = true } label: { PollBanner(poll: poll) }
                         .buttonStyle(.plain)
                 }
                 if let train = playback.hypeTrain {
@@ -142,9 +143,10 @@ struct ChatView: View {
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showPrediction) {
-            if let login = playback.login, let url = URL(string: "https://www.twitch.tv/popout/\(login)/chat?popout=") {
-                TwitchWebSheet(title: "Votar", url: url, hint: "Toca la predicción o la encuesta de arriba del chat para votar.")
-            }
+            if let prediction = playback.prediction { PredictionSheet(prediction: prediction).presentationDetents([.medium, .large]) }
+        }
+        .sheet(isPresented: $showPoll) {
+            if let poll = playback.poll { PollSheet(poll: poll).presentationDetents([.medium]) }
         }
         // Al girar el iPhone se cambia de chat (debajo del vídeo ↔ panel lateral):
         // el que aparece arranca siempre siguiendo el último mensaje
@@ -509,5 +511,128 @@ struct PollBanner: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .background(Color(red: 0.45, green: 0.68, blue: 1).opacity(0.1))
+    }
+}
+
+/// Apostar en la predicción desde la app: eliges cuántos puntos y a qué opción.
+struct PredictionSheet: View {
+    let prediction: Twitch.Prediction
+    @Environment(Account.self) private var account
+    @Environment(Playback.self) private var playback
+    @Environment(\.dismiss) private var dismiss
+    @State private var balance: Int?
+    @State private var points = 100.0
+    @State private var working = false
+    @State private var result: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text(prediction.title).font(.headline)
+                    if prediction.locked {
+                        Label("Las apuestas están cerradas", systemImage: "lock.fill").foregroundStyle(.secondary)
+                    }
+                }
+                if !prediction.locked {
+                    Section {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Apostar \(Int(points).formatted()) puntos").font(.subheadline.weight(.semibold)).monospacedDigit()
+                            Slider(value: $points, in: 10...max(10, Double(min(balance ?? 250_000, 250_000))), step: 10)
+                            if let balance { Text("Tienes \(balance.formatted())").font(.caption).foregroundStyle(.secondary) }
+                        }
+                    }
+                }
+                Section {
+                    let total = max(1, prediction.outcomes.map(\.points).reduce(0, +))
+                    ForEach(prediction.outcomes, id: \.id) { outcome in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(outcome.title).font(.subheadline.weight(.medium))
+                                Text("\(Int((Double(outcome.points) / Double(total) * 100).rounded())) % · \(Format.count(outcome.points)) puntos")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if !prediction.locked {
+                                Button("Apostar") { Task { await bet(outcome.id) } }
+                                    .buttonStyle(.borderedProminent).tint(Color.glint).foregroundStyle(.black)
+                                    .disabled(working)
+                            }
+                        }
+                    }
+                }
+                if let result {
+                    Section { Text(result) }
+                }
+            }
+            .navigationTitle("Predicción")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } } }
+        }
+        .task {
+            if let token = account.token, let login = playback.login {
+                balance = await Twitch.pointsBalance(login, token: token)
+                if let balance { points = Double(min(100, max(10, balance))) }
+            }
+        }
+    }
+
+    private func bet(_ outcomeID: String) async {
+        guard let token = account.token else { return }
+        working = true
+        defer { working = false }
+        do {
+            try await Twitch.makePrediction(eventID: prediction.id, outcomeID: outcomeID, points: Int(points), token: token)
+            result = "Apuesta hecha: \(Int(points).formatted()) puntos."
+        } catch {
+            result = error.localizedDescription
+        }
+    }
+}
+
+/// Votar en la encuesta desde la app.
+struct PollSheet: View {
+    let poll: Twitch.Poll
+    @Environment(Account.self) private var account
+    @Environment(\.dismiss) private var dismiss
+    @State private var working = false
+    @State private var result: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section { Text(poll.title).font(.headline) }
+                Section {
+                    ForEach(poll.choices, id: \.id) { choice in
+                        Button { Task { await vote(choice.id) } } label: {
+                            HStack {
+                                Text(choice.title)
+                                Spacer()
+                                Text("\(Format.count(choice.votes)) votos").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .disabled(working)
+                    }
+                }
+                if let result {
+                    Section { Text(result) }
+                }
+            }
+            .navigationTitle("Encuesta")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } } }
+        }
+    }
+
+    private func vote(_ choiceID: String) async {
+        guard let token = account.token, let userID = account.user?.id else { return }
+        working = true
+        defer { working = false }
+        do {
+            try await Twitch.voteInPoll(pollID: poll.id, choiceID: choiceID, userID: userID, token: token)
+            result = "Voto enviado."
+        } catch {
+            result = error.localizedDescription
+        }
     }
 }

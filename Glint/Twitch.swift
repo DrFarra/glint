@@ -547,7 +547,8 @@ enum Twitch {
 
     /// Predicción activa en el canal (como la tarjeta de la app de Twitch).
     struct Prediction: Equatable {
-        struct Outcome: Equatable { let title: String; let points: Int }
+        struct Outcome: Equatable { let id: String; let title: String; let points: Int }
+        let id: String
         let title: String
         let locked: Bool
         let outcomes: [Outcome]
@@ -564,8 +565,8 @@ enum Twitch {
         struct Node: Decodable { let pinnedMessage: Pinned? }
         struct Edge: Decodable { let node: Node? }
         struct Pins: Decodable { let edges: [Edge]? }
-        struct Outcome: Decodable { let title: String?; let totalPoints: Int? }
-        struct Event: Decodable { let title: String?; let status: String?; let outcomes: [Outcome]? }
+        struct Outcome: Decodable { let id: String; let title: String?; let totalPoints: Int? }
+        struct Event: Decodable { let id: String; let title: String?; let status: String?; let outcomes: [Outcome]? }
         struct Level: Decodable { let value: Int? }
         struct Progress: Decodable { let level: Level?; let progression: Int?; let total: Int? }
         struct Execution: Decodable { let progress: Progress? }
@@ -575,14 +576,14 @@ enum Twitch {
         guard let r: R = try? await query("""
             query($login: String!) { channel(name: $login) { \
             pinnedChatMessages(first: 1) { edges { node { pinnedMessage { content { text } sender { displayName } } } } } \
-            activePredictionEvents { title status outcomes { title totalPoints } } \
+            activePredictionEvents { id title status outcomes { id title totalPoints } } \
             hypeTrain { execution { progress { level { value } progression total } } } } }
             """, ["login": login]) else { return (nil, nil, nil) }
         let pin = r.channel?.pinnedChatMessages?.edges?.first?.node?.pinnedMessage
         let pinned = pin?.content?.text.map { text in pin?.sender?.displayName.map { "\($0): \(text)" } ?? text }
         let prediction = r.channel?.activePredictionEvents?.first.map { event in
-            Prediction(title: event.title ?? "Predicción", locked: event.status == "LOCKED",
-                       outcomes: (event.outcomes ?? []).map { .init(title: $0.title ?? "", points: $0.totalPoints ?? 0) })
+            Prediction(id: event.id, title: event.title ?? "Predicción", locked: event.status != "ACTIVE",
+                       outcomes: (event.outcomes ?? []).map { .init(id: $0.id, title: $0.title ?? "", points: $0.totalPoints ?? 0) })
         }
         let train = r.channel?.hypeTrain?.execution?.progress.map { progress in
             HypeTrain(level: progress.level?.value ?? 1,
@@ -680,26 +681,50 @@ enum Twitch {
 
     /// Encuesta en curso en el canal (pide sesión).
     struct Poll: Equatable {
-        struct Choice: Equatable { let title: String; let votes: Int }
+        struct Choice: Equatable { let id: String; let title: String; let votes: Int }
+        let id: String
         let title: String
         let choices: [Choice]
     }
 
     static func activePoll(_ login: String, token: String) async -> Poll? {
         struct Votes: Decodable { let total: Int? }
-        struct Choice: Decodable { let title: String?; let votes: Votes? }
-        struct Node: Decodable { let title: String?; let choices: [Choice]? }
+        struct Choice: Decodable { let id: String; let title: String?; let votes: Votes? }
+        struct Node: Decodable { let id: String; let title: String?; let choices: [Choice]? }
         struct Edge: Decodable { let node: Node? }
         struct Polls: Decodable { let edges: [Edge]? }
         struct U: Decodable { let polls: Polls? }
         struct R: Decodable { let user: U? }
         guard let r: R = try? await query("""
             query($login: String!) { user(login: $login) { polls(first: 1, status: ACTIVE) { edges { node { \
-            title choices { title votes { total } } } } } } }
+            id title choices { id title votes { total } } } } } } }
             """, ["login": login], token: token),
               let poll = r.user?.polls?.edges?.first?.node else { return nil }
-        return Poll(title: poll.title ?? "Encuesta",
-                    choices: (poll.choices ?? []).map { .init(title: $0.title ?? "", votes: $0.votes?.total ?? 0) })
+        return Poll(id: poll.id, title: poll.title ?? "Encuesta",
+                    choices: (poll.choices ?? []).map { .init(id: $0.id, title: $0.title ?? "", votes: $0.votes?.total ?? 0) })
+    }
+
+    /// Apostar puntos del canal a una opción de la predicción (por la web invisible: antibots).
+    @MainActor
+    static func makePrediction(eventID: String, outcomeID: String, points: Int, token: String) async throws {
+        let data = try await TwitchBridge.mutate("""
+            mutation($input: MakePredictionInput!) { makePrediction(input: $input) { error { code } } }
+            """, ["input": ["eventID": eventID, "outcomeID": outcomeID, "points": points,
+                            "transactionID": UUID().uuidString.replacingOccurrences(of: "-", with: "")]], token: token)
+        if let code = ((data["makePrediction"] as? [String: Any])?["error"] as? [String: Any])?["code"] as? String {
+            throw Failure(message: "Twitch no aceptó la apuesta (\(code))")
+        }
+    }
+
+    /// Votar en la encuesta (por la web invisible: antibots).
+    @MainActor
+    static func voteInPoll(pollID: String, choiceID: String, userID: String, token: String) async throws {
+        let data = try await TwitchBridge.mutate("""
+            mutation($input: VoteInPollInput!) { voteInPoll(input: $input) { error { code } } }
+            """, ["input": ["pollID": pollID, "choiceID": choiceID, "userID": userID, "voteID": UUID().uuidString]], token: token)
+        if let code = ((data["voteInPoll"] as? [String: Any])?["error"] as? [String: Any])?["code"] as? String {
+            throw Failure(message: "Twitch no aceptó el voto (\(code))")
+        }
     }
 
     /// Conversación de mensajes privados (whispers).
