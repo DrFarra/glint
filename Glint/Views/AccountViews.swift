@@ -341,7 +341,7 @@ struct ChatComposer: View {
     private var suggestionBar: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {
-                ForEach(suggestions, id: \.name) { suggestion in
+                ForEach(Array(suggestions.enumerated()), id: \.offset) { _, suggestion in
                     Button {
                         text = String(text.dropLast(lastWord.count)) + suggestion.name + " "
                     } label: {
