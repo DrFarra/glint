@@ -418,7 +418,8 @@ struct PlayerDetails: View {
                 let minutes = max(0, Int(-start.timeIntervalSinceNow / 60))
                 return minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) min" : "\(minutes) min"
             }
-            return [stream.game?.title, stream.viewersCount.map { "\(Format.count($0)) espectadores" }, uptime]
+            // El juego al final: es lo que se corta si no cabe
+            return [stream.viewersCount.map { "\(Format.count($0)) espectadores" }, uptime, stream.game?.title]
                 .compactMap { $0 }.joined(separator: " · ")
         }
         if let video = playback.video {
