@@ -45,17 +45,6 @@ struct AccountView: View {
                         }
                         .padding(.vertical, 4)
                     }
-                    Section("Con tu cuenta") {
-                        Label("Escribir y responder en el chat", systemImage: "bubble.left.and.text.bubble.right")
-                        Label("Tus emotes de suscripciones", systemImage: "face.smiling")
-                        Label("Tus canales seguidos en Inicio", systemImage: "heart")
-                        Label("Puntos, predicciones y encuestas", systemImage: "star.circle")
-                    }
-                    Section {
-                        Button("Cerrar sesión", role: .destructive) {
-                            Task { await account.signOut() }
-                        }
-                    }
                 } else {
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
@@ -84,13 +73,17 @@ struct AccountView: View {
                         Section { Text(failure).foregroundStyle(Color.live) }
                     }
                 }
-                Section {
-                    NavigationLink { SettingsView() } label: {
-                        Label("Ajustes", systemImage: "slider.horizontal.3")
+                // Los ajustes aquí mismo: antes estaban una pantalla más adentro
+                SettingsSections()
+                if account.user != nil {
+                    Section {
+                        Button("Cerrar sesión", role: .destructive) {
+                            Task { await account.signOut() }
+                        }
                     }
                 }
             }
-            .navigationTitle("Cuenta")
+            .navigationTitle("Ajustes")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } }
