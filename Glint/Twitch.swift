@@ -366,6 +366,45 @@ enum Twitch {
         "allow_source=true&allow_audio_only=true&playlist_include_framerate=true&supported_codecs=h264&p=\(Int.random(in: 100_000...999_999))"
     }
 
+    /// Le dice a Twitch que estás viendo el directo, como hace su web cada minuto: sin esto no cuenta
+    /// tu tiempo viendo, y sin él no hay puntos por ver ni cofres (el reproductor pide el vídeo sin sesión).
+    /// Antes se toca el vídeo con tu sesión (lista y cabecera del último trozo, calidad más baja),
+    /// porque Twitch cruza el aviso con eso.
+    static func reportWatching(login: String, channelID: String, broadcastID: String, userID: String, token: String) async throws {
+        struct T: Decodable { let value: String; let signature: String }
+        struct R: Decodable { let streamPlaybackAccessToken: T? }
+        let r: R = try await query("""
+            query($login: String!) { streamPlaybackAccessToken(channelName: $login, \
+            params: {platform: "web", playerBackend: "mediaplayer", playerType: "site"}) { value signature } }
+            """, ["login": login], token: token)
+        guard let t = r.streamPlaybackAccessToken,
+              let master = URL(string: "https://usher.ttvnw.net/api/channel/hls/\(login.lowercased()).m3u8?\(commonParams)&sig=\(t.signature)&token=\(escape(t.value))")
+        else { throw Failure(message: "sin acceso al directo") }
+        func lastEntry(_ url: URL) async throws -> URL {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let line = String(decoding: data, as: UTF8.self).split(separator: "\n")
+                    .last(where: { !$0.hasPrefix("#") && !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+                  let next = URL(string: String(line).trimmingCharacters(in: .whitespaces), relativeTo: url)
+            else { throw Failure(message: "lista de vídeo vacía") }
+            return next
+        }
+        var head = URLRequest(url: try await lastEntry(try await lastEntry(master)))
+        head.httpMethod = "HEAD"
+        _ = try await URLSession.shared.data(for: head)
+
+        let event: [[String: Any]] = [["event": "minute-watched", "properties": [
+            "channel_id": channelID, "broadcast_id": broadcastID, "player": "site", "live": true,
+            "user_id": Int(userID) ?? userID, "channel": login.lowercased(),
+        ] as [String: Any]]]
+        var request = URLRequest(url: URL(string: "https://spade.twitch.tv/track")!)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = "data=\(escape(try JSONSerialization.data(withJSONObject: event).base64EncodedString()))".data(using: .utf8)
+        let (_, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else { throw Failure(message: "Twitch respondió \(status)") }
+    }
+
     private static func escape(_ s: String) -> String {
         s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s
     }

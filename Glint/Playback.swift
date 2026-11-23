@@ -85,23 +85,51 @@ final class Playback {
         library?.recordWatch(video, position: engine.position)
     }
 
-    /// Cofre de puntos del canal: se reclama solo, como un clic tuyo y solo mientras lo ves.
-    /// Espera unos segundos al azar: reclamar al instante y siempre igual es lo que delata a un bot.
-    private func claimBonus(_ login: String) async {
-        guard UserDefaults.standard.object(forKey: "autoClaimBonus") as? Bool ?? true, engine.isPlaying,
-              let token = Account.shared.token,
-              let points = try? await Twitch.points(login, token: token), let claimID = points.claimID else { return }
+    /// Qué pasó la última vez con los puntos del directo (se ve en Ajustes › Puntos del canal).
+    private(set) var pointsStatus: String?
+
+    /// Cada minuto, mientras ves un directo con tu cuenta: le dice a Twitch que lo estás viendo (sin
+    /// eso no hay puntos por ver ni cofres) y, si hay cofre, lo reclama como un clic tuyo. Espera
+    /// unos segundos al azar: reclamar al instante y siempre igual es lo que delata a un bot.
+    private func watchAndClaim(_ login: String) async {
+        guard engine.isPlaying, let token = Account.shared.token, let userID = Account.shared.user?.id else { return }
+        let channelName = channel?.name ?? login
+        var status = [Date.now.formatted(date: .omitted, time: .shortened), channelName]
+        defer { pointsStatus = status.joined(separator: " · ") }
+        if let channelID = channel?.userID, let broadcastID = channel?.stream?.id {
+            do {
+                try await Twitch.reportWatching(login: login, channelID: channelID, broadcastID: broadcastID,
+                                                userID: userID, token: token)
+                status.append("Twitch sabe que lo ves")
+            } catch {
+                status.append("aviso de que lo ves falló: \(error.localizedDescription)")
+            }
+        }
+        guard UserDefaults.standard.object(forKey: "autoClaimBonus") as? Bool ?? true else { return }
+        let points: Twitch.Points
+        do {
+            points = try await Twitch.points(login, token: token)
+        } catch {
+            status.append("puntos: \(error.localizedDescription)")
+            return
+        }
+        status.append("saldo \(points.balance.map(Format.count) ?? "?")")
+        guard let claimID = points.claimID else {
+            status.append("sin cofre")
+            return
+        }
         try? await Task.sleep(for: .seconds(Double.random(in: 4...40)))
         guard !Task.isCancelled, engine.isPlaying else { return }
-        let channelName = channel?.name ?? login
         do {
             try await Twitch.claimBonus(channelID: points.channelID, claimID: claimID, token: token)
+            status.append("cofre reclamado")
             chat.notice("Cofre de \(points.name ?? "puntos") reclamado automáticamente.")
             // Aproximado: el saldo también sube solo por ver el directo
             let after = await Twitch.pointsBalance(login, token: token)
             let gained = after.flatMap { a in points.balance.map { a - $0 } }.flatMap { $0 > 0 ? $0 : nil }
             library?.recordClaim(BonusClaim(channel: channelName, date: .now, gained: gained, error: nil))
         } catch {
+            status.append("cofre: \(error.localizedDescription)")
             chat.notice("No se pudo reclamar el cofre de puntos: \(error.localizedDescription)")
             library?.recordClaim(BonusClaim(channel: channelName, date: .now, gained: nil, error: error.localizedDescription))
         }
@@ -130,7 +158,7 @@ final class Playback {
                         self.channel = fresh
                         engine.updateArchive(fresh.stream?.archiveVideo?.id)
                     }
-                    await claimBonus(login)
+                    await watchAndClaim(login)
                 }
             case .video(let id):
                 guard let video = try await Twitch.video(id) else {
