@@ -41,6 +41,7 @@ struct RootView: View {
     @Environment(Playback.self) private var playback
     @Environment(Library.self) private var library
     @Environment(Account.self) private var account
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         @Bindable var router = router
@@ -83,9 +84,11 @@ struct RootView: View {
         // Con sesión: perfil al día y los seguidos de tu cuenta en Inicio
         .task(id: account.user?.id) {
             await account.refresh()
-            if let token = account.token, let follows = try? await Twitch.followedChannels(token: token) {
-                library.importFollows(follows)
-            }
+            if let token = account.token { await library.importFollows(token: token) }
+        }
+        // Lo que sigas desde la web o el móvil mientras la app estaba en segundo plano
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active, let token = account.token { Task { await library.importFollows(token: token) } }
         }
         // El chat del directo abierto vuelve a entrar con la nueva identidad
         .onChange(of: account.user?.id) { playback.chat.reconnect() }

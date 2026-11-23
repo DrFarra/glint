@@ -1,3 +1,4 @@
+import AVFoundation
 import BackgroundTasks
 import Foundation
 import Observation
@@ -111,9 +112,15 @@ enum ThirdPartyEmotes {
 
 // MARK: - Miniaturas al buscar en un VOD
 
+/// Lo que da la miniatura de un segundo al arrastrar la barra (nil mientras se descarga).
+@MainActor
+protocol SeekPreviews: AnyObject {
+    func frame(at time: Double) -> UIImage?
+}
+
 /// Hojas de miniaturas de Twitch: una imagen cada `interval` segundos, en rejillas.
 @MainActor @Observable
-final class Storyboard {
+final class Storyboard: SeekPreviews {
     struct Info: Decodable {
         let count: Int
         let width: Int
@@ -176,6 +183,89 @@ final class Storyboard {
             }
             sheets[sheet] = image
         }
+    }
+}
+
+/// Miniaturas al buscar en un directo. Twitch no hace hojas de miniaturas hasta que acaba la
+/// emisión, así que se sacan del VOD que va grabando: de cada trozo de 10 s en la calidad más baja
+/// (160p, ~300 KB) se toma su primer fotograma. Se pide solo el último punto que señalas.
+@MainActor @Observable
+final class LivePreview: SeekPreviews {
+    private var frames: [Int: UIImage] = [:]
+    @ObservationIgnored private let media: URL
+    @ObservationIgnored private var segments: [(start: Double, url: URL)] = []
+    @ObservationIgnored private var initURL: URL?
+    @ObservationIgnored private var initData: Data?
+    @ObservationIgnored private var wanted: Int?
+    @ObservationIgnored private var loading = false
+    @ObservationIgnored private var refreshedAt = Date.distantPast
+
+    private init(media: URL) { self.media = media }
+
+    static func load(videoID: String) async -> LivePreview? {
+        guard let playlist = try? await Twitch.videoPlaylist(videoID),
+              let lowest = playlist.qualities.last(where: { !$0.name.lowercased().contains("audio") }) else { return nil }
+        let preview = LivePreview(media: lowest.url)
+        await preview.refresh()
+        return preview.segments.isEmpty ? nil : preview
+    }
+
+    /// La lista crece mientras dura el directo: se relee si se busca más allá de lo conocido.
+    private func refresh() async {
+        refreshedAt = .now
+        guard let text = try? await Twitch.text(media) else { return }
+        var start = 0.0
+        var duration = 0.0
+        var list: [(start: Double, url: URL)] = []
+        for line in text.components(separatedBy: .newlines) {
+            if line.hasPrefix("#EXT-X-MAP:"), let r = line.range(of: "URI=\""), let end = line[r.upperBound...].firstIndex(of: "\"") {
+                initURL = URL(string: String(line[r.upperBound..<end]), relativeTo: media)
+            } else if line.hasPrefix("#EXTINF:") {
+                duration = Double(line.dropFirst(8).prefix { $0 != "," }) ?? 10
+            } else if !line.hasPrefix("#"), !line.isEmpty, let url = URL(string: line, relativeTo: media) {
+                list.append((start, url))
+                start += duration
+            }
+        }
+        segments = list
+    }
+
+    func frame(at time: Double) -> UIImage? {
+        guard let index = segments.lastIndex(where: { $0.start <= time }) else { return nil }
+        if index == segments.count - 1, Date().timeIntervalSince(refreshedAt) > 20 {
+            Task { await refresh() }
+        }
+        if let image = frames[index] { return image }
+        wanted = index
+        if !loading { Task { await loadWanted() } }
+        return nil
+    }
+
+    private func loadWanted() async {
+        loading = true
+        defer { loading = false }
+        while let index = wanted, index < segments.count {
+            wanted = nil
+            if frames[index] != nil { continue }
+            if let image = await firstFrame(segment: segments[index].url) {
+                if frames.count > 120 { frames.removeAll() }
+                frames[index] = image
+            }
+        }
+    }
+
+    /// Un trozo fMP4 suelto no se puede abrir: se le antepone su cabecera (init) y se guarda como .mp4.
+    private func firstFrame(segment: URL) async -> UIImage? {
+        if initData == nil, let initURL { initData = try? await URLSession.shared.data(from: initURL).0 }
+        guard let body = try? await URLSession.shared.data(from: segment).0 else { return nil }
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("glint-preview-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: file) }
+        guard (try? ((initData ?? Data()) + body).write(to: file)) != nil else { return nil }
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: file))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 480, height: 270)
+        guard let image = try? await generator.image(at: .zero).image else { return nil }
+        return UIImage(cgImage: image)
     }
 }
 

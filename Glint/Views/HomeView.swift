@@ -3,6 +3,7 @@ import SwiftUI
 struct HomeView: View {
     @Environment(Library.self) private var library
     @Environment(Playback.self) private var playback
+    @Environment(Account.self) private var account
     @AppStorage("spanishOnly") private var spanishOnly = true
     @State private var streams: [Twitch.Stream] = []
     @State private var followed: [Twitch.Channel] = []
@@ -17,6 +18,10 @@ struct HomeView: View {
             LazyVStack(alignment: .leading, spacing: 28) {
                 if !library.follows.isEmpty {
                     followingSection
+                } else if account.isLoggedIn, let problem = library.followsProblem {
+                    Label(problem, systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
 
                 if !library.watched.isEmpty {
@@ -43,6 +48,7 @@ struct HomeView: View {
             ToolbarItem(placement: .topBarTrailing) { AccountButton() }
         }
         .refreshable {
+            if let token = account.token { await library.importFollows(token: token) }
             await loadStreams()
             await loadFollowed()
         }

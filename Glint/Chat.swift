@@ -36,6 +36,16 @@ struct ChatMessage: Identifiable {
     /// Id del mensaje en Twitch (para responderlo o borrarlo) y usuario que lo escribió.
     var ircID: String?
     var login = ""
+    /// Insignias tal como llegan ("moderator/1") y su imagen, cuando ya se conoce.
+    var badges: [String] = []
+    var badgeURLs: [String] = []
+    /// Cuándo llegó (para la hora junto al mensaje).
+    let date = Date()
+    /// Te menciona a ti (se resalta, como en la app de Twitch).
+    var mentionsMe = false
+    /// Cuándo entró en el chat a su ritmo normal (nil si llegó de golpe: al saltar o al soltar los
+    /// retenidos). Solo esos se animan al aparecer.
+    var shownAt: Date?
 
     var plainText: String {
         parts.map { part in
@@ -53,8 +63,9 @@ struct ChatMessage: Identifiable {
         }
     }
 
+    /// Imágenes que hacen falta antes de enseñarlo: emotes e insignias.
     var emoteURLs: [String] {
-        parts.compactMap { part in
+        badgeURLs + parts.compactMap { part in
             if case .emote(let url, _) = part { return url }
             return nil
         }
@@ -86,7 +97,11 @@ final class ChatClient {
     @ObservationIgnored private var pendingSends: [(text: String, reply: ChatMessage?, sent: Date)] = []
     @ObservationIgnored private var userColor: Substring?
     @ObservationIgnored private var userName: String?
-    @ObservationIgnored private var room: [String: String] = [:]
+    private var room: [String: String] = [:]
+    /// Tus insignias en este canal (llegan con USERSTATE); nil hasta entonces.
+    private var badges: Set<String>?
+    /// Twitch dijo que no puedes escribir aquí (baneo, email o teléfono sin verificar).
+    private var refused: String?
     /// Twitch rechazó el token en el chat: se sigue como anónimo hasta volver a iniciar sesión.
     @ObservationIgnored private var authFailed = false
 
@@ -101,6 +116,9 @@ final class ChatClient {
     /// Emotes de 7TV, BTTV y FFZ del canal: nombre → URL.
     @ObservationIgnored private var extraEmotes: [String: String] = [:]
     @ObservationIgnored private var emoteTask: Task<Void, Never>?
+    @ObservationIgnored private var badgeTask: Task<Void, Never>?
+    /// Imagen de cada insignia ("subscriber/12" → URL), globales y del canal.
+    @ObservationIgnored private var badgeImages: [String: String] = [:]
     /// Lista de emotes de 7TV/BTTV/FFZ ya descargada. Hasta entonces los mensajes del
     /// directo esperan en `waiting`: si no, se quedarían con el emote como texto.
     @ObservationIgnored private var emotesLoaded = false
@@ -108,6 +126,18 @@ final class ChatClient {
 
     func loadEmotes(channelID: String?) {
         emoteTask?.cancel()
+        badgeTask?.cancel()
+        badgeTask = Task { [weak self] in
+            let badges = await Twitch.badges(channelID: channelID)
+            guard !Task.isCancelled, let self else { return }
+            badgeImages = badges
+            // Los mensajes que ya llegaron también se ponen sus insignias
+            messages = messages.map(expand)
+            held = held.map(expand)
+            ready = ready.map(expand)
+            staged = staged.map { (message: expand($0.message), arrived: $0.arrived) }
+            for message in messages + held { EmoteImages.shared.prefetch(message.emoteURLs) }
+        }
         // La lista guardada de la última vez sirve al instante; la de 7TV de un canal grande
         // tarda varios segundos en llegar
         if let cached = ThirdPartyEmotes.cached(channelID: channelID) { apply(cached) }
@@ -161,6 +191,8 @@ final class ChatClient {
         loop?.cancel()
         socket?.cancel(with: .goingAway, reason: nil)
         pendingSends = []
+        badges = nil
+        refused = nil
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.run(channel)
@@ -226,7 +258,7 @@ final class ChatClient {
     }
 
     /// Aviso de Twitch o de la app dentro del chat.
-    private func notice(_ text: String) {
+    func notice(_ text: String) {
         receive(ChatMessage(name: "", color: .secondary, parts: [], isAction: false,
                             kind: .event(.init(style: .notice, text: text))))
     }
@@ -240,6 +272,9 @@ final class ChatClient {
         if rest.contains(" USERSTATE #") {
             userColor = tags["color"]
             userName = tags["display-name"].map(Self.unescape)
+            var badges = Set((tags["badges"] ?? "").split(separator: ",").compactMap { $0.split(separator: "/").first.map(String.init) })
+            if tags["mod"] == "1" { badges.insert("moderator") }
+            self.badges = badges
             if let id = tags["id"], !pendingSends.isEmpty {
                 echo(pendingSends.removeFirst(), id: String(id))
             }
@@ -252,6 +287,9 @@ final class ChatClient {
                 return
             }
             if id.hasPrefix("msg_"), !pendingSends.isEmpty { pendingSends.removeFirst() }
+            if ["msg_banned", "msg_verified_email", "msg_requires_verified_phone_number"].contains(id) {
+                refused = Self.translate(notice: id, trailing)
+            }
             if !trailing.isEmpty { notice(Self.translate(notice: id, trailing)) }
         } else if rest.contains(" ROOMSTATE #") {
             for key in ["emote-only", "followers-only", "slow", "subs-only"] {
@@ -276,6 +314,26 @@ final class ChatClient {
         ready.removeAll(where: match)
         staged.removeAll { match($0.message) }
         pendingCount = held.count
+    }
+
+    /// Por qué no puedes escribir aquí, o nil si puedes. Si algo no se sabe aún, nil: mejor
+    /// dejarte intentarlo (Twitch avisará) que esconder la caja por error.
+    /// `followedAt`: nil = no se sabe; `.some(nil)` = no sigues el canal.
+    func writeBlock(followedAt: Date??) -> String? {
+        if let refused { return refused }
+        guard let badges, badges.isDisjoint(with: ["broadcaster", "moderator", "vip", "staff", "admin", "global_mod"]) else {
+            return nil
+        }
+        let subscribed = badges.contains("subscriber") || badges.contains("founder")
+        if room["subs-only"] == "1", !subscribed { return "Solo pueden escribir los suscriptores del canal." }
+        if let minutes = room["followers-only"].flatMap({ Int($0) }), minutes >= 0, !subscribed, let followedAt {
+            guard let since = followedAt else { return "Solo pueden escribir los seguidores del canal." }
+            let left = minutes - Int(-since.timeIntervalSinceNow / 60)
+            if left > 0 {
+                return "Podrás escribir cuando lleves \(Self.duration(minutes: minutes)) siguiendo el canal (te falta \(Self.duration(minutes: left)))."
+            }
+        }
+        return nil
     }
 
     nonisolated static func describe(_ room: [String: String]) -> [String] {
@@ -322,6 +380,7 @@ final class ChatClient {
         loop = Task { [weak self] in
             var queue: [(time: Double, message: ChatMessage)] = []
             var cursor = 0.0, fetchedUntil = -1.0, last = -100.0
+            var edge: Set<String> = []  // ids ya pedidos del segundo fetchedUntil
             var finished = false, jumped = false
             var jumpDeadline: Date?
             // Los mensajes se convierten a emotes al pedirlos: primero hace falta la lista de emotes
@@ -338,6 +397,7 @@ final class ChatClient {
                     queue = []
                     cursor = max(0, now - 20)
                     fetchedUntil = cursor - 1
+                    edge = []
                     finished = false
                     jumped = true
                     jumpDeadline = nil
@@ -345,17 +405,26 @@ final class ChatClient {
                 last = now
                 if !finished, fetchedUntil < now + 30,
                    let page = try? await Twitch.comments(video: videoID, at: Int(cursor)) {
-                    let fresh = page.comments.filter { Double($0.contentOffsetSeconds ?? 0) > fetchedUntil }
+                    // La página empieza antes del segundo pedido: lo del borde se separa por id
+                    let fresh = page.comments.filter { comment in
+                        let time = Double(comment.contentOffsetSeconds ?? 0)
+                        return time > fetchedUntil || time == fetchedUntil && !edge.contains(comment.id ?? "")
+                    }
                     let items = fresh.map { (time: Double($0.contentOffsetSeconds ?? 0), message: message(from: $0)) }
                     for item in items { EmoteImages.shared.prefetch(item.message.emoteURLs) }
                     queue += items
-                    if let end = fresh.last?.contentOffsetSeconds {
-                        fetchedUntil = Double(end)
-                        cursor = fetchedUntil + 1
-                    } else if page.more {
+                    if let end = items.last?.time {
+                        if end > fetchedUntil { edge = [] }
+                        edge.formUnion(fresh.filter { Double($0.contentOffsetSeconds ?? 0) == end }.compactMap(\.id))
+                        fetchedUntil = end
+                        cursor = end + 1
+                    } else if !page.more {
+                        finished = true
+                    } else if page.comments.isEmpty {
                         cursor += 30
                     } else {
-                        finished = true
+                        // Con mucho chat la página entera puede quedar por detrás: saltar 30 s dejaba un hueco
+                        cursor += 1
                     }
                 }
                 let due = queue.prefix { $0.time <= now }.count
@@ -404,6 +473,8 @@ final class ChatClient {
         authenticated = false
         roomModes = []
         room = [:]
+        badges = nil
+        refused = nil
         pendingSends = []
     }
 
@@ -448,7 +519,24 @@ final class ChatClient {
     // MARK: - Ritmo del chat
 
     /// Mensaje del directo recién llegado, todavía sin emotes de 7TV/BTTV/FFZ.
+    /// Usuarios cuyos mensajes no quieres ver (se guarda en el iPhone).
+    static var hidden: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: "hiddenChatters") ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: "hiddenChatters") }
+    }
+
+    func setHidden(_ login: String, _ hide: Bool) {
+        if hide { Self.hidden.insert(login) } else { Self.hidden.remove(login) }
+        if hide { remove { $0.login == login } }
+    }
+
     private func receive(_ message: ChatMessage) {
+        guard !Self.hidden.contains(message.login) else { return }
+        var message = message
+        if let me = Account.shared.user?.login, message.login != me,
+           message.plainText.lowercased().contains("@\(me)") || message.plainText.lowercased().split(separator: " ").contains(Substring(me)) {
+            message.mentionsMe = true
+        }
         if emotesLoaded {
             stage(expand(message))
         } else {
@@ -494,7 +582,8 @@ final class ChatClient {
             pendingCount = held.count
         } else {
             // Sin animación: con el chat desplazado, una animación movía lo que se estaba leyendo
-            messages += batch
+            let now = Date()
+            messages += batch.map { var message = $0; message.shownAt = now; return message }
             if messages.count > 200 { messages.removeFirst(messages.count - 200) }
         }
     }
@@ -519,6 +608,11 @@ final class ChatClient {
         var message = ChatMessage(name: comment.commenter?.name ?? "?",
                                   color: Self.color(comment.message?.userColor.map { Substring($0) }, name: login),
                                   parts: Self.annotate(parts), isAction: false)
+        message.login = login
+        message.badges = (comment.message?.userBadges ?? []).compactMap { badge in
+            guard let set = badge.setID, !set.isEmpty, let version = badge.version else { return nil }
+            return "\(set)/\(version)"
+        }
         // En los VOD Twitch guarda las suscripciones como texto normal: se reconocen por la frase
         let plain = (comment.message?.fragments ?? []).compactMap(\.text).joined()
         if plain.contains(" subscribed at Tier ") || plain.contains(" subscribed with Prime") {
@@ -531,8 +625,10 @@ final class ChatClient {
         return expand(message)
     }
 
-    /// Cambia las palabras que son emotes de 7TV/BTTV/FFZ por su imagen.
+    /// Pone la imagen de sus insignias y cambia las palabras que son emotes de 7TV/BTTV/FFZ por su imagen.
     private func expand(_ message: ChatMessage) -> ChatMessage {
+        var message = message
+        message.badgeURLs = message.badges.compactMap { badgeImages[$0] }
         guard !extraEmotes.isEmpty else { return message }
         var parts: [ChatMessage.Part] = []
         var changed = false
@@ -612,6 +708,7 @@ final class ChatClient {
                                   isAction: isAction)
         message.ircID = tags["id"].map(String.init)
         message.login = login
+        message.badges = (tags["badges"] ?? "").split(separator: ",").map(String.init)
         let msgID = tags["msg-id"].map(String.init) ?? ""
         if isNotice {
             // Una suscripción múltiple llega también regalo a regalo: basta con el aviso general
@@ -785,6 +882,19 @@ final class EmoteImages {
         }
     }
 
+    /// Espera a tener la imagen, para las vistas que sí quieren enterarse (el selector de emotes).
+    func loaded(_ url: String) async -> UIImage? {
+        if !isReady(url) {
+            if loading.insert(url).inserted {
+                await load(url)
+            } else {
+                // Ya la está bajando otro: se espera a que acabe
+                while loading.contains(url), !Task.isCancelled { try? await Task.sleep(for: .milliseconds(80)) }
+            }
+        }
+        return image(url)
+    }
+
     private func load(_ link: String) async {
         defer { loading.remove(link) }
         guard let url = URL(string: link), let data = try? await URLSession.shared.data(from: url).0 else {
@@ -792,11 +902,13 @@ final class EmoteImages {
             return
         }
         // Decodificar fuera del hilo principal: un emote animado tiene decenas de fotogramas
-        let frames = await Task.detached(priority: .userInitiated) { Self.decode(data) }.value
+        // Las insignias, algo más bajas que la línea, como en la app de Twitch
+        let height = link.contains("/badges/v1/") ? Self.badgeHeight : Self.lineHeight
+        let frames = await Task.detached(priority: .userInitiated) { Self.decode(data, height: height) }.value
         if let frames { cache[link] = frames } else { failed.insert(link) }
     }
 
-    nonisolated private static func decode(_ data: Data) -> Frames? {
+    nonisolated private static func decode(_ data: Data, height lineHeight: CGFloat) -> Frames? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let count = CGImageSourceGetCount(source)
         guard count > 0 else { return nil }
@@ -805,7 +917,7 @@ final class EmoteImages {
         // tamaño: antes cada uno salía a su tamaño original (los pequeños se veían pixelados
         // o más chicos, y si un fotograma medía distinto el emote saltaba o pisaba el texto)
         let canvas = canvasSize(source) ?? CGSize(width: first.width, height: first.height)
-        let size = CGSize(width: (Self.lineHeight * canvas.width / canvas.height).rounded(), height: Self.lineHeight)
+        let size = CGSize(width: (lineHeight * canvas.width / canvas.height).rounded(), height: lineHeight)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 3
         format.opaque = false
@@ -827,6 +939,7 @@ final class EmoteImages {
     }
 
     nonisolated private static let lineHeight: CGFloat = 22
+    nonisolated private static let badgeHeight: CGFloat = 18
 
     /// Tamaño de la animación entera (puede ser mayor que el de un fotograma suelto).
     nonisolated private static func canvasSize(_ source: CGImageSource) -> CGSize? {

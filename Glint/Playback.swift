@@ -19,6 +19,77 @@ final class Playback {
     /// Otras emisiones del canal, debajo de un vídeo.
     private(set) var moreVideos: [Twitch.Video] = []
     private(set) var problem: String?
+    /// Campañas de drops activas en el directo que se está viendo.
+    private(set) var liveDrops: [String] = []
+    /// Encima del chat del directo: el mensaje fijado y la predicción en curso.
+    private(set) var pinnedMessage: String?
+    private(set) var prediction: Twitch.Prediction?
+    private(set) var hypeTrain: Twitch.HypeTrain?
+    /// Encuesta en curso (pide sesión) y raid que prepara el canal.
+    private(set) var poll: Twitch.Poll?
+    private(set) var raidTarget: (login: String, name: String, viewers: Int)?
+    @ObservationIgnored private var raidTask: Task<Void, Never>?
+
+    /// Solo para las capturas: los avisos de encima del chat con datos de ejemplo, para ver cómo
+    /// quedan aunque ningún canal tenga ahora una predicción, encuesta, raid o hype train.
+    func injectDemoEvents() {
+        pinnedMessage = "Moderador: el sorteo es a las 22:00, no hace falta seguir para participar"
+        prediction = Twitch.Prediction(id: "demo", title: "¿Gana la partida?", locked: false,
+                                       outcomes: [.init(id: "a", title: "Sí", points: 182_400), .init(id: "b", title: "No", points: 97_150)])
+        poll = Twitch.Poll(id: "demo", title: "¿Qué jugamos después?",
+                           choices: [.init(id: "a", title: "Minecraft", votes: 812), .init(id: "b", title: "GTA VI", votes: 1_405)])
+        hypeTrain = Twitch.HypeTrain(level: 3, progress: 0.62)
+        raidTarget = (login: "auronplay", name: "auronplay", viewers: 41_200)
+    }
+
+    /// Ir ya al canal del raid (botón del aviso).
+    func followRaid() {
+        guard let target = raidTarget?.login else { return }
+        play(.live(target))
+    }
+
+    /// Como la app de Twitch: si el canal hace raid, te vas con él. La cuenta atrás dura poco, así que
+    /// se mira cada 15 s. Cuando el raid desaparece: si el directo acaba enseguida se lanzó (y vas al
+    /// otro canal); si sigue, se canceló.
+    private func watchRaids(_ login: String) {
+        raidTask?.cancel()
+        raidTask = Task { [weak self] in
+            var lastSeen: Date?
+            while !Task.isCancelled {
+                if let raid = await Twitch.raid(login) {
+                    self?.raidTarget = raid
+                    lastSeen = .now
+                } else if let seen = lastSeen, self?.raidTarget != nil {
+                    if let channel = try? await Twitch.channel(login), channel.stream == nil {
+                        self?.chat.notice("Raid: vas con \(self?.raidTarget?.name ?? "el canal").")
+                        self?.followRaid()
+                        return
+                    }
+                    if Date().timeIntervalSince(seen) > 150 {
+                        self?.raidTarget = nil
+                        lastSeen = nil
+                    }
+                }
+                try? await Task.sleep(for: .seconds(15))
+            }
+        }
+    }
+    @ObservationIgnored private var lastDropsCheck = Date.distantPast
+    /// Editor del clip recién creado (se abre en una hoja) o por qué no se pudo crear.
+    var clipEditor: URL?
+    var clipProblem: String?
+
+    /// Clip de lo último del directo, como el botón de la app de Twitch.
+    func createClip() async {
+        guard let token = Account.shared.token, let id = channel?.userID, let start = channel?.stream?.createdAt else { return }
+        // Lo que se ve va unos segundos por detrás del directo
+        let offset = max(0, Int(Date().timeIntervalSince(start)) - 8)
+        do {
+            clipEditor = try await Twitch.createClip(broadcasterID: id, offsetSeconds: offset, token: token)
+        } catch {
+            clipProblem = error.localizedDescription
+        }
+    }
     let engine = PlayerEngine()
     let chat = ChatClient()
     /// Para el historial de vídeos vistos; lo asigna la vista raíz.
@@ -78,11 +149,94 @@ final class Playback {
         video = nil
         clip = nil
         moreVideos = []
+        liveDrops = []
+        pinnedMessage = nil
+        prediction = nil
+        hypeTrain = nil
+        poll = nil
+        raidTarget = nil
+        raidTask?.cancel()
     }
 
     private func saveProgress() {
         guard case .video = media, let video, engine.position > 0 else { return }
         library?.recordWatch(video, position: engine.position)
+    }
+
+    /// Qué pasó la última vez con los puntos del directo (se ve en Ajustes › Puntos del canal).
+    private(set) var pointsStatus: String?
+
+    /// Cada minuto, mientras ves un directo con tu cuenta: le dice a Twitch que lo estás viendo (sin
+    /// eso no hay puntos por ver ni cofres) y, si hay cofre, lo reclama como un clic tuyo. Espera
+    /// unos segundos al azar: reclamar al instante y siempre igual es lo que delata a un bot.
+    private func watchAndClaim(_ login: String) async {
+        let channelName = channel?.name ?? login
+        var status = [Date.now.formatted(date: .omitted, time: .shortened), channelName]
+        defer { pointsStatus = status.joined(separator: " · ") }
+        guard let token = Account.shared.token, let userID = Account.shared.user?.id else {
+            status.append("sin sesión: no cuenta")
+            return
+        }
+        guard engine.isPlaying else {
+            status.append("vídeo en pausa: no cuenta")
+            return
+        }
+        if let channelID = channel?.userID, let broadcastID = channel?.stream?.id {
+            do {
+                try await Twitch.reportWatching(login: login, channelID: channelID, broadcastID: broadcastID,
+                                                userID: userID, token: token)
+                status.append("Twitch sabe que lo ves")
+            } catch {
+                status.append("aviso de que lo ves falló: \(error.localizedDescription)")
+            }
+        }
+        guard UserDefaults.standard.object(forKey: "autoClaimBonus") as? Bool ?? true else { return }
+        let points: Twitch.Points
+        do {
+            points = try await Twitch.points(login, token: token)
+        } catch {
+            status.append("puntos: \(error.localizedDescription)")
+            return
+        }
+        // Exacto, no "3,9 mil": así se ve subir de 10 en 10 y se sabe si Twitch te cuenta como espectador
+        status.append("saldo \(points.balance.map { $0.formatted() } ?? "?")")
+        guard let claimID = points.claimID else {
+            status.append("sin cofre")
+            return
+        }
+        try? await Task.sleep(for: .seconds(Double.random(in: 4...40)))
+        guard !Task.isCancelled, engine.isPlaying else { return }
+        do {
+            try await Twitch.claimBonus(channelID: points.channelID, claimID: claimID, token: token)
+            status.append("cofre reclamado")
+            chat.notice("Cofre de \(points.name ?? "puntos") reclamado automáticamente.")
+            // Aproximado: el saldo también sube solo por ver el directo
+            let after = await Twitch.pointsBalance(login, token: token)
+            let gained = after.flatMap { a in points.balance.map { a - $0 } }.flatMap { $0 > 0 ? $0 : nil }
+            library?.recordClaim(BonusClaim(channel: channelName, date: .now, gained: gained, error: nil))
+        } catch {
+            status.append("cofre: \(error.localizedDescription)")
+            chat.notice("No se pudo reclamar el cofre de puntos: \(error.localizedDescription)")
+            library?.recordClaim(BonusClaim(channel: channelName, date: .now, gained: nil, error: error.localizedDescription))
+        }
+    }
+
+    /// Drops completados del canal que ves: se reclaman solos (la app de Twitch solo avisa). Cada
+    /// 10 min y solo en canales con drops, porque leer el inventario puede abrir la web de Twitch.
+    private func claimDrops() async {
+        guard !liveDrops.isEmpty, engine.isPlaying, UserDefaults.standard.object(forKey: "autoClaimDrops") as? Bool ?? true,
+              let token = Account.shared.token, Date().timeIntervalSince(lastDropsCheck) > 600 else { return }
+        lastDropsCheck = .now
+        guard let campaigns = try? await Twitch.dropsInProgress(token: token) else { return }
+        for drop in campaigns.flatMap({ $0.timeBasedDrops ?? [] }) where drop.claimable {
+            guard let id = drop.`self`?.dropInstanceID else { continue }
+            do {
+                try await Twitch.claimDrop(instanceID: id, token: token)
+                chat.notice("Drop reclamado automáticamente: \(drop.title).")
+            } catch {
+                chat.notice("No se pudo reclamar el drop \(drop.title): \(error.localizedDescription)")
+            }
+        }
     }
 
     private func start(_ media: Media) async {
@@ -101,6 +255,9 @@ final class Playback {
                     return
                 }
                 engine.startLive(login: login, startedAt: stream.createdAt, archiveID: stream.archiveVideo?.id)
+                watchRaids(login)
+                liveDrops = await Twitch.channelDrops(login)
+                (pinnedMessage, prediction, hypeTrain) = await Twitch.chatExtras(login)
                 // Espectadores, título y categoría al día
                 while !Task.isCancelled {
                     try await Task.sleep(for: .seconds(60))
@@ -108,6 +265,10 @@ final class Playback {
                         self.channel = fresh
                         engine.updateArchive(fresh.stream?.archiveVideo?.id)
                     }
+                    (pinnedMessage, prediction, hypeTrain) = await Twitch.chatExtras(login)
+                    if let token = Account.shared.token { poll = await Twitch.activePoll(login, token: token) }
+                    await watchAndClaim(login)
+                    await claimDrops()
                 }
             case .video(let id):
                 guard let video = try await Twitch.video(id) else {

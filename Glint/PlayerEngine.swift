@@ -27,11 +27,30 @@ final class PlayerEngine {
     /// Se está cambiando de conexión para saltarse un anuncio.
     private(set) var skippingAd = false
     var fill = false { didSet { layer?.videoGravity = fill ? .resizeAspectFill : .resizeAspect } }
+    /// Temporizador para dormir: minutos elegidos (0 = desactivado). Al acabar, pausa.
+    private(set) var sleepMinutes = 0
+    @ObservationIgnored private var sleepTask: Task<Void, Never>?
+
+    func setSleep(minutes: Int) {
+        sleepTask?.cancel()
+        sleepMinutes = minutes
+        guard minutes > 0 else { return }
+        sleepTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(minutes * 60))
+            guard !Task.isCancelled, let self else { return }
+            if isPlaying { togglePlay() }
+            sleepMinutes = 0
+        }
+    }
 
     /// Miniaturas para la barra de un VOD.
-    private(set) var storyboard: Storyboard?
-    /// Tramos del VOD con el audio silenciado.
+    /// Miniaturas al arrastrar la barra: las de Twitch en un VOD, sacadas del vídeo en un directo.
+    private(set) var storyboard: (any SeekPreviews)?
+    /// Tramos del VOD con el audio silenciado (sin contar los que se han podido recuperar).
     private(set) var muted: [Range<Double>] = []
+    /// Recupera el audio original de los VOD; uno por vídeo (ver Unmuter).
+    @ObservationIgnored private var unmuter: Unmuter?
+    @ObservationIgnored private var mutedFromPlaylist = false
 
     /// Tramo silenciado en el que está la reproducción ahora mismo.
     var currentMuted: Range<Double>? {
@@ -65,6 +84,9 @@ final class PlayerEngine {
     @ObservationIgnored private var adReconnects = 0
     @ObservationIgnored private var startedAt: Date?
     @ObservationIgnored private var archiveID: String?
+    /// Lista del VOD de la emisión, pedida antes de hacer falta: retroceder en el directo
+    /// pedía cada vez el permiso y la lista, y tardaba.
+    @ObservationIgnored private var archivePlaylist: (playlist: Twitch.Playlist, at: Date)?
     @ObservationIgnored private var master: URL?
     @ObservationIgnored private var loadTask: Task<Void, Never>?
     @ObservationIgnored private var timeObserver: Any?
@@ -91,18 +113,47 @@ final class PlayerEngine {
         self.archiveID = archiveID
         rate = 1
         load(.live, at: nil)
+        prepareArchive()
+    }
+
+    /// Con el VOD de la emisión ya conocido: su lista para retroceder y las miniaturas del directo.
+    private func prepareArchive() {
+        guard let id = archiveID else { return }
+        Task { [weak self] in
+            _ = try? await self?.archiveList()
+            guard self?.storyboard == nil, let preview = await LivePreview.load(videoID: id),
+                  let self, self.archiveID == id, self.mode != .vod else { return }
+            self.storyboard = preview
+        }
+    }
+
+    private func archiveList() async throws -> Twitch.Playlist {
+        // El permiso de Twitch dura un rato: pasados 10 min se pide otra vez
+        if let cached = archivePlaylist, Date().timeIntervalSince(cached.at) < 600 { return cached.playlist }
+        let playlist = try await Twitch.videoPlaylist(archiveID ?? "")
+        archivePlaylist = (playlist, .now)
+        return playlist
     }
 
     func startVOD(id: String, length: Double, at offset: Double? = nil) {
         videoID = id
         clipSlug = nil
+        mutedFromPlaylist = false
+        unmuter = Unmuter { [weak self] ranges in
+            Task { @MainActor in
+                guard let self, self.videoID == id, self.clipSlug == nil else { return }
+                self.mutedFromPlaylist = true
+                self.muted = ranges
+            }
+        }
         Task { [weak self] in
             async let mutedRanges = try? Twitch.mutedSegments(id)
             let board = await Storyboard.load(videoID: id)
             let ranges = await mutedRanges ?? []
-            if self?.videoID == id, self?.clipSlug == nil {
-                self?.storyboard = board
-                self?.muted = ranges
+            if let self, self.videoID == id, self.clipSlug == nil {
+                self.storyboard = board
+                // Lo que dice la lista es más exacto: ya descuenta los tramos con el audio recuperado
+                if !self.mutedFromPlaylist { self.muted = ranges }
             }
         }
         startedAt = nil
@@ -113,7 +164,10 @@ final class PlayerEngine {
 
     /// El VOD de la emisión puede aparecer unos minutos después de empezar.
     func updateArchive(_ id: String?) {
-        if let id { archiveID = id }
+        guard let id, id != archiveID else { return }
+        archiveID = id
+        archivePlaylist = nil
+        prepareArchive()
     }
 
     func goLive() {
@@ -142,7 +196,10 @@ final class PlayerEngine {
         playerAttempt = 0
         adReconnects = 0
         storyboard = nil
+        archivePlaylist = nil
         muted = []
+        unmuter = nil
+        boosted = false
         player.replaceCurrentItem(with: nil)
         itemObserver = nil
         qualities = []
@@ -162,7 +219,7 @@ final class PlayerEngine {
                 let playlist: Twitch.Playlist
                 switch newMode {
                 case .live: playlist = try await adFreeLivePlaylist()
-                case .archive: playlist = try await Twitch.videoPlaylist(archiveID ?? "")
+                case .archive: playlist = try await archiveList()
                 case .vod:
                     if let clipSlug {
                         playlist = try await Twitch.clipPlaylist(clipSlug)
@@ -232,7 +289,12 @@ final class PlayerEngine {
 
     private func replaceItem(at offset: Double?) async {
         guard let url = streamURL else { return }
-        let item = AVPlayerItem(url: url)
+        let item: AVPlayerItem
+        if mode == .vod, clipSlug == nil, let unmuter {
+            item = AVPlayerItem(asset: unmuter.asset(url))
+        } else {
+            item = AVPlayerItem(url: url)
+        }
         itemObserver = item.observe(\.status) { [weak self] item, _ in
             guard item.status == .failed else { return }
             let message = item.error?.localizedDescription ?? "No se pudo reproducir"
@@ -245,9 +307,10 @@ final class PlayerEngine {
         if let offset, offset > 0 {
             await item.readyToPlay()
             guard player.currentItem === item else { return }
-            // Los VOD de Twitch son listas EVENT: a veces el primer salto no se aplica, así que se comprueba
+            // Los VOD de Twitch son listas EVENT: a veces el primer salto no se aplica, así que se comprueba.
+            // Con 2 s de margen empieza en el corte más cercano en vez de buscar el fotograma exacto (más rápido)
             let target = CMTime(seconds: offset, preferredTimescale: 600)
-            let tolerance = CMTime(seconds: 1, preferredTimescale: 600)
+            let tolerance = CMTime(seconds: 2, preferredTimescale: 600)
             for _ in 0..<5 {
                 await player.seek(to: target, toleranceBefore: tolerance, toleranceAfter: tolerance)
                 if abs(player.currentTime().seconds - offset) < 5 { break }
@@ -322,6 +385,16 @@ final class PlayerEngine {
         rate = value
         player.defaultRate = value
         if isPlaying { player.rate = value }
+    }
+
+    /// Mantener pulsado el vídeo: 2× mientras dure, sin cambiar la velocidad elegida.
+    /// En directo no hay nada por delante que adelantar.
+    private(set) var boosted = false
+
+    func setBoost(_ on: Bool) {
+        guard on != boosted, !on || mode != .live else { return }
+        boosted = on
+        if on { player.rate = 2 } else if isPlaying { player.rate = rate }
     }
 
     // MARK: - Imagen y Picture in Picture

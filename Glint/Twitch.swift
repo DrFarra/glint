@@ -97,6 +97,7 @@ enum Twitch {
     }
 
     struct Comment: Decodable {
+        let id: String?
         let contentOffsetSeconds: Int?
         let commenter: Broadcaster?
         let message: Body?
@@ -104,7 +105,10 @@ enum Twitch {
         struct Body: Decodable {
             let userColor: String?
             let fragments: [Fragment]?
+            let userBadges: [Badge]?
         }
+
+        struct Badge: Decodable { let setID: String?; let version: String? }
 
         struct Fragment: Decodable {
             let text: String?
@@ -229,10 +233,16 @@ enum Twitch {
             query($id: ID!) { video(id: $id) { muteInfo { mutedSegmentConnection { nodes { duration offset } } } } }
             """, ["id": id])
         let nodes = (r.video?.muteInfo?.mutedSegmentConnection?.nodes ?? []).sorted { ($0.offset ?? 0) < ($1.offset ?? 0) }
+        return merged(nodes.compactMap { node -> Range<Double>? in
+            guard let offset = node.offset, let duration = node.duration, duration > 0 else { return nil }
+            return Double(offset)..<Double(offset + duration)
+        })
+    }
+
+    /// Une los tramos (ordenados) que van seguidos o casi.
+    static func merged(_ sorted: [Range<Double>]) -> [Range<Double>] {
         var ranges: [Range<Double>] = []
-        for node in nodes {
-            guard let offset = node.offset, let duration = node.duration, duration > 0 else { continue }
-            let range = Double(offset)..<Double(offset + duration)
+        for range in sorted {
             if let last = ranges.last, range.lowerBound <= last.upperBound + 1 {
                 ranges[ranges.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
             } else {
@@ -295,7 +305,7 @@ enum Twitch {
 
     // MARK: - Chat de los VOD
 
-    /// Mensajes del chat de un VOD desde un segundo dado (Twitch devuelve una página de ~1 minuto).
+    /// Mensajes del chat de un VOD cerca de un segundo dado: ~60 mensajes, empezando unos segundos *antes*.
     static func comments(video id: String, at offset: Int) async throws -> (comments: [Comment], more: Bool) {
         struct P: Decodable { let hasNextPage: Bool? }
         struct C: Decodable { let edges: [Connection<Comment>.Edge]?; let pageInfo: P? }
@@ -303,8 +313,8 @@ enum Twitch {
         struct R: Decodable { let video: V? }
         let r: R = try await query("""
             query($id: ID!, $t: Int) { video(id: $id) { comments(contentOffsetSeconds: $t) { edges { node { \
-            contentOffsetSeconds commenter { login displayName } \
-            message { userColor fragments { text emote { emoteID } } } } } pageInfo { hasNextPage } } } }
+            id contentOffsetSeconds commenter { login displayName } \
+            message { userColor userBadges { setID version } fragments { text emote { emoteID } } } } } pageInfo { hasNextPage } } } }
             """, ["id": id, "t": offset])
         let comments = r.video?.comments
         return (comments?.edges?.compactMap(\.node) ?? [], comments?.pageInfo?.hasNextPage ?? false)
@@ -357,6 +367,45 @@ enum Twitch {
     // shortcut: solo H.264, el único códec que AVPlayer reproduce seguro en todos los iPhone; añadir h265 si hace falta 1440p
     private static var commonParams: String {
         "allow_source=true&allow_audio_only=true&playlist_include_framerate=true&supported_codecs=h264&p=\(Int.random(in: 100_000...999_999))"
+    }
+
+    /// Le dice a Twitch que estás viendo el directo, como hace su web cada minuto: sin esto no cuenta
+    /// tu tiempo viendo, y sin él no hay puntos por ver ni cofres (el reproductor pide el vídeo sin sesión).
+    /// Antes se toca el vídeo con tu sesión (lista y cabecera del último trozo, calidad más baja),
+    /// porque Twitch cruza el aviso con eso.
+    static func reportWatching(login: String, channelID: String, broadcastID: String, userID: String, token: String) async throws {
+        struct T: Decodable { let value: String; let signature: String }
+        struct R: Decodable { let streamPlaybackAccessToken: T? }
+        let r: R = try await query("""
+            query($login: String!) { streamPlaybackAccessToken(channelName: $login, \
+            params: {platform: "web", playerBackend: "mediaplayer", playerType: "site"}) { value signature } }
+            """, ["login": login], token: token)
+        guard let t = r.streamPlaybackAccessToken,
+              let master = URL(string: "https://usher.ttvnw.net/api/channel/hls/\(login.lowercased()).m3u8?\(commonParams)&sig=\(t.signature)&token=\(escape(t.value))")
+        else { throw Failure(message: "sin acceso al directo") }
+        func lastEntry(_ url: URL) async throws -> URL {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let line = String(decoding: data, as: UTF8.self).split(separator: "\n")
+                    .last(where: { !$0.hasPrefix("#") && !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+                  let next = URL(string: String(line).trimmingCharacters(in: .whitespaces), relativeTo: url)
+            else { throw Failure(message: "lista de vídeo vacía") }
+            return next
+        }
+        var head = URLRequest(url: try await lastEntry(try await lastEntry(master)))
+        head.httpMethod = "HEAD"
+        _ = try await URLSession.shared.data(for: head)
+
+        let event: [[String: Any]] = [["event": "minute-watched", "properties": [
+            "channel_id": channelID, "broadcast_id": broadcastID, "player": "site", "live": true,
+            "user_id": Int(userID) ?? userID, "channel": login.lowercased(),
+        ] as [String: Any]]]
+        var request = URLRequest(url: URL(string: "https://spade.twitch.tv/track")!)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = "data=\(escape(try JSONSerialization.data(withJSONObject: event).base64EncodedString()))".data(using: .utf8)
+        let (_, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else { throw Failure(message: "Twitch respondió \(status)") }
     }
 
     private static func escape(_ s: String) -> String {
@@ -428,12 +477,35 @@ enum Twitch {
         return r.currentUser
     }
 
-    /// Canales que sigue la cuenta (hasta 500).
-    static func followedChannels(token: String) async throws -> [ChannelRef] {
+    /// Canales que sigue la cuenta. A algunas cuentas Twitch se los da vacíos a la app (y la API
+    /// oficial pide un permiso que la sesión de la web no tiene), así que si no llegan se leen de la
+    /// página "Siguiendo" de twitch.tv. `tried` dice qué pasó si no llegan por ninguna vía.
+    @MainActor
+    static func followedChannels(token: String) async -> (channels: [ChannelRef], tried: [String]) {
+        var tried: [String] = []
+        do {
+            let channels = try await followedChannelsFromAPI(token: token)
+            if !channels.isEmpty { return (channels, []) }
+            tried.append("app: vacía")
+        } catch {
+            tried.append("app: \(error.localizedDescription)")
+        }
+        do {
+            let channels = try await TwitchBridge.followedChannels(token: token)
+            if !channels.isEmpty { return (channels, []) }
+            tried.append("web de Twitch: no apareció la lista")
+        } catch {
+            tried.append("web de Twitch: \(error.localizedDescription)")
+        }
+        return ([], tried)
+    }
+
+    /// Hasta 500, por la API de Twitch como el resto de la app.
+    private static func followedChannelsFromAPI(token: String) async throws -> [ChannelRef] {
         struct Node: Decodable { let login: String; let displayName: String?; let profileImageURL: String? }
         struct Edge: Decodable { let cursor: String?; let node: Node? }
-        struct Info: Decodable { let hasNextPage: Bool }
-        struct Follows: Decodable { let edges: [Edge]; let pageInfo: Info }
+        struct Info: Decodable { let hasNextPage: Bool? }
+        struct Follows: Decodable { let edges: [Edge]?; let pageInfo: Info? }
         struct User: Decodable { let follows: Follows? }
         struct R: Decodable { let currentUser: User? }
         var out: [ChannelRef] = []
@@ -445,26 +517,375 @@ enum Twitch {
                 query($after: Cursor) { currentUser { follows(first: 100, after: $after) { \
                 edges { cursor node { login displayName profileImageURL(width: 70) } } pageInfo { hasNextPage } } } }
                 """, variables, token: token)
-            guard let follows = r.currentUser?.follows else { break }
-            out += follows.edges.compactMap { edge in
+            guard let user = r.currentUser else { throw Failure(message: "Twitch no reconoce tu sesión aquí") }
+            let edges = user.follows?.edges ?? []
+            out += edges.compactMap { edge in
                 edge.node.map { ChannelRef(login: $0.login, displayName: $0.displayName ?? $0.login, avatar: $0.profileImageURL) }
             }
-            guard follows.pageInfo.hasNextPage, let cursor = follows.edges.last?.cursor else { break }
+            guard user.follows?.pageInfo?.hasNextPage == true, let cursor = edges.last?.cursor else { break }
             after = cursor
         }
         return out
     }
 
+    // MARK: - Chat: insignias, fijado, predicciones y fichas de usuario
+
+    /// Imagen de cada insignia ("moderator/1" → URL): las globales y, encima, las del canal.
+    static func badges(channelID: String?) async -> [String: String] {
+        struct Badge: Decodable { let setID: String?; let version: String?; let imageURL: String? }
+        struct U: Decodable { let broadcastBadges: [Badge]? }
+        struct R: Decodable { let badges: [Badge]?; let user: U? }
+        let fields = "setID version imageURL(size: DOUBLE)"
+        let channel = channelID.map { "user(id: \"\($0)\") { broadcastBadges { \(fields) } }" } ?? ""
+        guard let r: R = try? await query("query { badges { \(fields) } \(channel) }") else { return [:] }
+        var out: [String: String] = [:]
+        for badge in (r.badges ?? []) + (r.user?.broadcastBadges ?? []) {
+            if let set = badge.setID, let version = badge.version, let url = badge.imageURL { out["\(set)/\(version)"] = url }
+        }
+        return out
+    }
+
+    /// Predicción activa en el canal (como la tarjeta de la app de Twitch).
+    struct Prediction: Equatable {
+        struct Outcome: Equatable { let id: String; let title: String; let points: Int }
+        let id: String
+        let title: String
+        let locked: Bool
+        let outcomes: [Outcome]
+    }
+
+    /// Hype train en marcha: nivel y cuánto falta para el siguiente.
+    struct HypeTrain: Equatable { let level: Int; let progress: Double }
+
+    /// Lo que va encima del chat del directo: el mensaje fijado, la predicción y el hype train.
+    static func chatExtras(_ login: String) async -> (pinned: String?, prediction: Prediction?, hypeTrain: HypeTrain?) {
+        struct Sender: Decodable { let displayName: String? }
+        struct Content: Decodable { let text: String? }
+        struct Pinned: Decodable { let content: Content?; let sender: Sender? }
+        struct Node: Decodable { let pinnedMessage: Pinned? }
+        struct Edge: Decodable { let node: Node? }
+        struct Pins: Decodable { let edges: [Edge]? }
+        struct Outcome: Decodable { let id: String; let title: String?; let totalPoints: Int? }
+        struct Event: Decodable { let id: String; let title: String?; let status: String?; let outcomes: [Outcome]? }
+        struct Level: Decodable { let value: Int? }
+        struct Progress: Decodable { let level: Level?; let progression: Int?; let total: Int? }
+        struct Execution: Decodable { let progress: Progress? }
+        struct Train: Decodable { let execution: Execution? }
+        struct C: Decodable { let pinnedChatMessages: Pins?; let activePredictionEvents: [Event]?; let hypeTrain: Train? }
+        struct R: Decodable { let channel: C? }
+        guard let r: R = try? await query("""
+            query($login: String!) { channel(name: $login) { \
+            pinnedChatMessages(first: 1) { edges { node { pinnedMessage { content { text } sender { displayName } } } } } \
+            activePredictionEvents { id title status outcomes { id title totalPoints } } \
+            hypeTrain { execution { progress { level { value } progression total } } } } }
+            """, ["login": login]) else { return (nil, nil, nil) }
+        let pin = r.channel?.pinnedChatMessages?.edges?.first?.node?.pinnedMessage
+        let pinned = pin?.content?.text.map { text in pin?.sender?.displayName.map { "\($0): \(text)" } ?? text }
+        let prediction = r.channel?.activePredictionEvents?.first.map { event in
+            Prediction(id: event.id, title: event.title ?? "Predicción", locked: event.status != "ACTIVE",
+                       outcomes: (event.outcomes ?? []).map { .init(id: $0.id, title: $0.title ?? "", points: $0.totalPoints ?? 0) })
+        }
+        let train = r.channel?.hypeTrain?.execution?.progress.map { progress in
+            HypeTrain(level: progress.level?.value ?? 1,
+                      progress: Double(progress.progression ?? 0) / Double(max(1, progress.total ?? 1)))
+        }
+        return (pinned, prediction, train)
+    }
+
+    /// Datos públicos de un usuario del chat (su ficha).
+    struct UserCard: Decodable {
+        let displayName: String?
+        let createdAt: Date?
+        let profileImageURL: String?
+        let followers: Count?
+        let description: String?
+    }
+
+    static func userCard(_ login: String) async -> UserCard? {
+        struct R: Decodable { let user: UserCard? }
+        let r: R? = try? await query("""
+            query($login: String!) { user(login: $login) { displayName createdAt description \
+            profileImageURL(width: 150) followers { totalCount } } }
+            """, ["login": login])
+        return r?.user
+    }
+
+    // MARK: - Canal: "Acerca de" y horario
+
+    struct Panel: Decodable, Identifiable {
+        let id: String
+        let title: String?
+        let imageURL: String?
+        let linkURL: String?
+        let description: String?
+    }
+
+    struct ScheduleSegment: Decodable, Identifiable {
+        let startAt: Date?
+        let endAt: Date?
+        let title: String?
+        let categories: [Game]?
+        var id: String { "\(startAt?.timeIntervalSince1970 ?? 0)-\(title ?? "")" }
+        struct Game: Decodable { let displayName: String? }
+    }
+
+    /// Paneles de "Acerca de" y próximas emisiones del horario del canal.
+    static func channelAbout(_ login: String) async -> (panels: [Panel], schedule: [ScheduleSegment]) {
+        struct Schedule: Decodable { let segments: [ScheduleSegment]? }
+        struct C: Decodable { let schedule: Schedule? }
+        struct U: Decodable { let panels: [Panel?]?; let channel: C? }
+        struct R: Decodable { let user: U? }
+        guard let r: R = try? await query("""
+            query($login: String!) { user(login: $login) { \
+            panels { id ... on DefaultPanel { title imageURL linkURL description } } \
+            channel { schedule { segments { startAt endAt title categories { displayName } } } } } }
+            """, ["login": login]) else { return ([], []) }
+        let panels = (r.user?.panels ?? []).compactMap { $0 }.filter { $0.imageURL != nil || $0.description?.isEmpty == false }
+        let upcoming = (r.user?.channel?.schedule?.segments ?? []).filter { ($0.endAt ?? .distantFuture) > .now }
+        return (panels, Array(upcoming.prefix(7)))
+    }
+
+    // MARK: - Clips
+
+    /// Crea un clip del directo hasta ese segundo de la emisión y devuelve su editor (para ponerle
+    /// título, como hace la app de Twitch). Va por la web invisible: Twitch lo protege con su antibots.
+    @MainActor
+    static func createClip(broadcasterID: String, offsetSeconds: Int, token: String) async throws -> URL {
+        let data = try await TwitchBridge.mutate("""
+            mutation($input: CreateClipInput!) { createClip(input: $input) { clip { slug } error { code } } }
+            """, ["input": ["broadcasterID": broadcasterID, "offsetSeconds": offsetSeconds]], token: token)
+        let result = data["createClip"] as? [String: Any]
+        if let code = (result?["error"] as? [String: Any])?["code"] as? String {
+            throw Failure(message: "Twitch no dejó crear el clip (\(code))")
+        }
+        guard let slug = (result?["clip"] as? [String: Any])?["slug"] as? String,
+              let url = URL(string: "https://clips.twitch.tv/\(slug)/edit") else {
+            throw Failure(message: "Twitch no devolvió el clip")
+        }
+        return url
+    }
+
+    // MARK: - Raids, encuestas, mensajes privados y bits
+
+    /// Raid que está preparando el canal (a quién y con cuánta gente). Público.
+    static func raid(_ login: String) async -> (login: String, name: String, viewers: Int)? {
+        struct Target: Decodable { let login: String; let displayName: String? }
+        struct Raid: Decodable { let viewerCount: Int?; let targetChannel: Target? }
+        struct U: Decodable { let raid: Raid? }
+        struct R: Decodable { let user: U? }
+        guard let r: R = try? await query("query($login: String!) { user(login: $login) { raid { viewerCount targetChannel { login displayName } } } }",
+                                          ["login": login]),
+              let raid = r.user?.raid, let target = raid.targetChannel else { return nil }
+        return (target.login, target.displayName ?? target.login, raid.viewerCount ?? 0)
+    }
+
+    /// Encuesta en curso en el canal (pide sesión).
+    struct Poll: Equatable {
+        struct Choice: Equatable { let id: String; let title: String; let votes: Int }
+        let id: String
+        let title: String
+        let choices: [Choice]
+    }
+
+    static func activePoll(_ login: String, token: String) async -> Poll? {
+        struct Votes: Decodable { let total: Int? }
+        struct Choice: Decodable { let id: String; let title: String?; let votes: Votes? }
+        struct Node: Decodable { let id: String; let title: String?; let choices: [Choice]? }
+        struct Edge: Decodable { let node: Node? }
+        struct Polls: Decodable { let edges: [Edge]? }
+        struct U: Decodable { let polls: Polls? }
+        struct R: Decodable { let user: U? }
+        guard let r: R = try? await query("""
+            query($login: String!) { user(login: $login) { polls(first: 1, status: ACTIVE) { edges { node { \
+            id title choices { id title votes { total } } } } } } }
+            """, ["login": login], token: token),
+              let poll = r.user?.polls?.edges?.first?.node else { return nil }
+        return Poll(id: poll.id, title: poll.title ?? "Encuesta",
+                    choices: (poll.choices ?? []).map { .init(id: $0.id, title: $0.title ?? "", votes: $0.votes?.total ?? 0) })
+    }
+
+    /// Apostar puntos del canal a una opción de la predicción (por la web invisible: antibots).
+    @MainActor
+    static func makePrediction(eventID: String, outcomeID: String, points: Int, token: String) async throws {
+        let data = try await TwitchBridge.mutate("""
+            mutation($input: MakePredictionInput!) { makePrediction(input: $input) { error { code } } }
+            """, ["input": ["eventID": eventID, "outcomeID": outcomeID, "points": points,
+                            "transactionID": UUID().uuidString.replacingOccurrences(of: "-", with: "")]], token: token)
+        if let code = ((data["makePrediction"] as? [String: Any])?["error"] as? [String: Any])?["code"] as? String {
+            throw Failure(message: "Twitch no aceptó la apuesta (\(code))")
+        }
+    }
+
+    /// Votar en la encuesta (por la web invisible: antibots).
+    @MainActor
+    static func voteInPoll(pollID: String, choiceID: String, userID: String, token: String) async throws {
+        let data = try await TwitchBridge.mutate("""
+            mutation($input: VoteInPollInput!) { voteInPoll(input: $input) { error { code } } }
+            """, ["input": ["pollID": pollID, "choiceID": choiceID, "userID": userID, "voteID": UUID().uuidString]], token: token)
+        if let code = ((data["voteInPoll"] as? [String: Any])?["error"] as? [String: Any])?["code"] as? String {
+            throw Failure(message: "Twitch no aceptó el voto (\(code))")
+        }
+    }
+
+    /// Conversación de mensajes privados (whispers).
+    struct WhisperThread: Decodable, Identifiable {
+        let id: String
+        let unreadMessagesCount: Int?
+        let participants: [Participant]?
+        let messages: Messages?
+
+        struct Participant: Decodable { let id: String?; let login: String?; let displayName: String?; let profileImageURL: String? }
+        struct Messages: Decodable { let edges: [Edge]? }
+        struct Edge: Decodable { let node: Message? }
+        struct Message: Decodable, Identifiable {
+            let id: String?
+            let content: Content?
+            let from: Participant?
+            let sentAt: Date?
+            struct Content: Decodable { let content: String? }
+        }
+        /// La otra persona de la conversación.
+        func other(than me: String?) -> Participant? { participants?.first { $0.login != me } ?? participants?.first }
+    }
+
+    static func whisperThreads(token: String) async throws -> [WhisperThread] {
+        struct Edge: Decodable { let node: WhisperThread? }
+        struct Threads: Decodable { let edges: [Edge]? }
+        struct U: Decodable { let whisperThreads: Threads? }
+        struct R: Decodable { let currentUser: U? }
+        let r: R = try await query("""
+            query { currentUser { whisperThreads(first: 30) { edges { node { id unreadMessagesCount \
+            participants { id login displayName profileImageURL(width: 70) } \
+            messages(first: 1) { edges { node { id content { content } from { id login displayName } sentAt } } } } } } } }
+            """, token: token)
+        return r.currentUser?.whisperThreads?.edges?.compactMap(\.node) ?? []
+    }
+
+    /// Mensajes de una conversación, del más antiguo al más nuevo.
+    static func whispers(thread id: String, token: String) async throws -> [WhisperThread.Message] {
+        struct T: Decodable { let messages: WhisperThread.Messages? }
+        struct R: Decodable { let whisperThread: T? }
+        let r: R = try await query("""
+            query($id: ID!) { whisperThread(id: $id) { messages(first: 50) { edges { node { \
+            id content { content } from { id login displayName } sentAt } } } } }
+            """, ["id": id], token: token)
+        return (r.whisperThread?.messages?.edges?.compactMap(\.node) ?? []).sorted { ($0.sentAt ?? .distantPast) < ($1.sentAt ?? .distantPast) }
+    }
+
+    /// Enviar un mensaje privado. Twitch lo protege con su antibots: va por la web invisible.
+    @MainActor
+    static func sendWhisper(_ text: String, to userID: String, token: String) async throws {
+        _ = try await TwitchBridge.mutate("""
+            mutation($input: SendWhisperInput!) { sendWhisper(input: $input) { message { id } } }
+            """, ["input": ["message": text, "nonce": UUID().uuidString, "recipientUserID": userID]], token: token)
+    }
+
+    /// Tus bits (nil si Twitch no lo dice).
+    static func bitsBalance(token: String) async -> Int? {
+        struct U: Decodable { let bitsBalance: Int? }
+        struct R: Decodable { let currentUser: U? }
+        let r: R? = try? await query("query { currentUser { bitsBalance } }", token: token)
+        return r?.currentUser?.bitsBalance
+    }
+
+    // MARK: - Drops
+
+    /// Campaña de drops en curso en tu inventario, como la devuelve Twitch (la API o su web).
+    struct DropCampaign: Decodable, Identifiable {
+        let id: String
+        let name: String?
+        let endAt: Date?
+        let game: Game?
+        let timeBasedDrops: [Drop]?
+
+        struct Game: Decodable { let displayName: String?; let boxArtURL: String? }
+
+        struct Drop: Decodable, Identifiable {
+            let id: String
+            let name: String?
+            let requiredMinutesWatched: Int?
+            let benefitEdges: [Edge]?
+            let `self`: Me?
+
+            struct Edge: Decodable { let benefit: Benefit? }
+            struct Benefit: Decodable { let name: String?; let imageAssetURL: String? }
+            struct Me: Decodable { let currentMinutesWatched: Int?; let isClaimed: Bool?; let dropInstanceID: String? }
+
+            var title: String { benefitEdges?.first?.benefit?.name ?? name ?? "Drop" }
+            var image: URL? { benefitEdges?.first?.benefit?.imageAssetURL.flatMap(URL.init(string:)) }
+            var watched: Int { self.`self`?.currentMinutesWatched ?? 0 }
+            var required: Int { requiredMinutesWatched ?? 0 }
+            var claimed: Bool { self.`self`?.isClaimed ?? false }
+            var progress: Double { required > 0 ? min(1, Double(watched) / Double(required)) : 0 }
+            /// Listo para reclamar: Twitch le da un id de instancia cuando se completa.
+            var claimable: Bool { !claimed && self.`self`?.dropInstanceID != nil && watched >= required }
+        }
+    }
+
+    /// Tus campañas de drops en curso. Si la API no las da (como con los seguidos, a algunas cuentas
+    /// se los da vacíos), se leen de la página de inventario de twitch.tv.
+    @MainActor
+    static func dropsInProgress(token: String) async throws -> [DropCampaign] {
+        struct Inventory: Decodable { let dropCampaignsInProgress: [DropCampaign]? }
+        struct User: Decodable { let inventory: Inventory? }
+        struct R: Decodable { let currentUser: User? }
+        if let r: R = try? await query("""
+            query { currentUser { inventory { dropCampaignsInProgress { id name endAt \
+            game { displayName boxArtURL(width: 80, height: 107) } timeBasedDrops { id name requiredMinutesWatched \
+            benefitEdges { benefit { name imageAssetURL } } self { currentMinutesWatched isClaimed dropInstanceID } } } } } }
+            """, token: token),
+           let campaigns = r.currentUser?.inventory?.dropCampaignsInProgress, !campaigns.isEmpty {
+            return campaigns
+        }
+        let responses = try await TwitchBridge.pageResponses("https://www.twitch.tv/drops/inventory",
+                                                             containing: "dropCampaignsInProgress", what: "drops", token: token)
+        // La respuesta de su web: cualquier "dropCampaignsInProgress", esté donde esté
+        func find(_ json: Any) -> Any? {
+            if let dict = json as? [String: Any] {
+                if let list = dict["dropCampaignsInProgress"] as? [Any] { return list }
+                return dict.values.lazy.compactMap(find).first
+            }
+            return (json as? [Any])?.lazy.compactMap(find).first
+        }
+        guard let list = responses.lazy.compactMap(find).first else { return [] }
+        return try decoder.decode([DropCampaign].self, from: JSONSerialization.data(withJSONObject: list))
+    }
+
+    /// Reclamar un drop completado. Twitch lo protege con su antibots: va por la web invisible.
+    @MainActor
+    static func claimDrop(instanceID: String, token: String) async throws {
+        // Si Twitch lo rechaza, mutate lanza el error; quien llama recarga el inventario para ver el resultado
+        _ = try await TwitchBridge.mutate("""
+            mutation($input: ClaimDropRewardsInput!) { claimDropRewards(input: $input) { status } }
+            """, ["input": ["dropInstanceID": instanceID]], token: token)
+    }
+
+    /// Campañas de drops activas en un canal (se ve sin sesión).
+    static func channelDrops(_ login: String) async -> [String] {
+        struct Campaign: Decodable { let name: String? }
+        struct C: Decodable { let viewerDropCampaigns: [Campaign]? }
+        struct R: Decodable { let channel: C? }
+        let r: R? = try? await query("query($login: String!) { channel(name: $login) { viewerDropCampaigns { name } } }",
+                                     ["login": login])
+        return r?.channel?.viewerDropCampaigns?.compactMap(\.name) ?? []
+    }
+
     /// ¿La cuenta sigue a este canal? nil si no se pudo saber.
     static func isFollowing(_ login: String, token: String) async -> Bool? {
-        struct Follower: Decodable { let followedAt: String? }
+        await followedAt(login, token: token).map { $0 != nil }
+    }
+
+    /// Desde cuándo la cuenta sigue al canal: `.some(nil)` si no lo sigue, nil si no se pudo saber.
+    static func followedAt(_ login: String, token: String) async -> Date?? {
+        struct Follower: Decodable { let followedAt: Date? }
         struct Relation: Decodable { let follower: Follower? }
         struct User: Decodable { let `self`: Relation? }
         struct R: Decodable { let user: User? }
         guard let r: R = try? await query("query($login: String!) { user(login: $login) { self { follower { followedAt } } } }",
                                           ["login": login], token: token),
               let relation = r.user?.`self` else { return nil }
-        return relation.follower != nil
+        // Si sigue pero sin fecha, cuenta como seguidor de siempre: mejor dejar escribir que bloquear por error
+        return .some(relation.follower.map { $0.followedAt ?? .distantPast })
     }
 
     static func emoteSets(token: String) async throws -> [Account.EmoteSet] {
@@ -483,6 +904,108 @@ enum Twitch {
         }
         // Los de canales primero; los globales de Twitch al final
         return sets.filter { !$0.emotes.isEmpty }.sorted { ($0.owner == "Twitch" ? 1 : 0) < ($1.owner == "Twitch" ? 1 : 0) }
+    }
+
+    /// Seguir o dejar de seguir con la cuenta (vía la web invisible, ver TwitchBridge). Quien
+    /// llama lo comprueba después con `isFollowing`.
+    @MainActor
+    static func setFollow(_ login: String, _ follow: Bool, token: String) async throws {
+        struct U: Decodable { let id: String }
+        struct R: Decodable { let user: U? }
+        let r: R = try await query("query($login: String!) { user(login: $login) { id } }", ["login": login])
+        guard let id = r.user?.id else { throw Failure(message: "No se encontró el canal") }
+        let mutation = follow
+            ? "mutation($id: ID!) { followUser(input: {targetID: $id, disableNotifications: false}) { follow { followedAt } } }"
+            : "mutation($id: ID!) { unfollowUser(input: {targetID: $id}) { follow { followedAt } } }"
+        _ = try await TwitchBridge.mutate(mutation, ["id": id], token: token)
+    }
+
+    // MARK: - Puntos del canal
+
+    struct Reward: Decodable, Identifiable {
+        let id: String
+        let title: String
+        let cost: Int
+        let prompt: String?
+        let isEnabled: Bool?
+        let isPaused: Bool?
+        let isInStock: Bool?
+        let isUserInputRequired: Bool?
+        let backgroundColor: String?
+        let image: Image?
+        let defaultImage: Image?
+        let cooldownExpiresAt: Date?
+        struct Image: Decodable { let url2x: String? }
+
+        var imageURL: URL? { (image?.url2x ?? defaultImage?.url2x).flatMap(URL.init(string:)) }
+        var available: Bool {
+            isEnabled != false && isPaused != true && isInStock != false && (cooldownExpiresAt ?? .distantPast) < Date()
+        }
+    }
+
+    struct Points {
+        let channelID: String
+        /// Cómo llama el canal a sus puntos ("Puntuelos") y su icono.
+        let name: String?
+        let iconURL: URL?
+        let balance: Int?
+        /// Cofre de bonificación listo para reclamar.
+        let claimID: String?
+        let rewards: [Reward]
+    }
+
+    /// Puntos de la cuenta en el canal y sus recompensas (cada canal tiene las suyas).
+    static func points(_ login: String, token: String) async throws -> Points {
+        struct Claim: Decodable { let id: String }
+        struct CP: Decodable { let balance: Int?; let availableClaim: Claim? }
+        struct Me: Decodable { let communityPoints: CP? }
+        struct Icon: Decodable { let url: String? }
+        struct Settings: Decodable { let name: String?; let image: Icon?; let customRewards: [Reward]? }
+        struct C: Decodable { let id: String; let `self`: Me?; let communityPointsSettings: Settings? }
+        struct R: Decodable { let channel: C? }
+        let r: R = try await query("""
+            query($login: String!) { channel(name: $login) { id self { communityPoints { balance availableClaim { id } } } \
+            communityPointsSettings { name image { url } customRewards { id title cost prompt isEnabled isPaused isInStock \
+            isUserInputRequired backgroundColor image { url2x } defaultImage { url2x } cooldownExpiresAt } } } }
+            """, ["login": login], token: token)
+        guard let c = r.channel else { throw Failure(message: "No se encontró el canal") }
+        let settings = c.communityPointsSettings
+        return Points(channelID: c.id, name: settings?.name, iconURL: settings?.image?.url.flatMap(URL.init(string:)),
+                      balance: c.`self`?.communityPoints?.balance, claimID: c.`self`?.communityPoints?.availableClaim?.id,
+                      rewards: (settings?.customRewards ?? []).sorted { $0.cost < $1.cost })
+    }
+
+    @MainActor
+    static func redeem(_ reward: Reward, channelID: String, text: String?, token: String) async throws {
+        let data = try await TwitchBridge.mutate("""
+            mutation($input: RedeemCommunityPointsCustomRewardInput!) { redeemCommunityPointsCustomReward(input: $input) { error { code } } }
+            """, ["input": ["channelID": channelID, "cost": reward.cost, "prompt": text ?? NSNull(), "rewardID": reward.id,
+                            "title": reward.title, "transactionID": UUID().uuidString.replacingOccurrences(of: "-", with: "")]],
+            token: token)
+        if let code = ((data["redeemCommunityPointsCustomReward"] as? [String: Any])?["error"] as? [String: Any])?["code"] as? String {
+            throw Failure(message: rewardError(code))
+        }
+    }
+
+    @MainActor
+    static func claimBonus(channelID: String, claimID: String, token: String) async throws {
+        let data = try await TwitchBridge.mutate("""
+            mutation($input: ClaimCommunityPointsInput!) { claimCommunityPoints(input: $input) { error { code } } }
+            """, ["input": ["channelID": channelID, "claimID": claimID]], token: token)
+        if let code = ((data["claimCommunityPoints"] as? [String: Any])?["error"] as? [String: Any])?["code"] as? String {
+            throw Failure(message: "Twitch no dejó reclamar el cofre (\(code))")
+        }
+    }
+
+    private static func rewardError(_ code: String) -> String {
+        switch code {
+        case "NOT_ENOUGH_POINTS": "No tienes puntos suficientes"
+        case "PROPERTIES_MISMATCH": "La recompensa ha cambiado: vuelve a abrirla"
+        case "COOLDOWN", "GLOBAL_COOLDOWN": "Esta recompensa está en espera"
+        case "MAX_PER_STREAM", "MAX_PER_USER_PER_STREAM": "Ya no se puede canjear más en este directo"
+        case "DISABLED", "PAUSED", "OUT_OF_STOCK": "Esta recompensa no está disponible ahora"
+        default: "Twitch no pudo canjearla (\(code))"
+        }
     }
 
     /// Puntos de canal de la cuenta en ese canal.

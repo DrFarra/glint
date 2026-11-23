@@ -110,13 +110,29 @@ enum Demo {
                 try? await Task.sleep(for: .seconds(8))
                 playback.engine.togglePlay()
             }
-        case "landscape":
+        case "landscape", "chatoverlay":
+            UserDefaults.standard.set(screen == "chatoverlay", forKey: "chatOverlay")
             if let login {
                 playback.play(.live(login))
                 try? await Task.sleep(for: .seconds(8))
                 Orientation.set(landscape: true)
                 try? await Task.sleep(for: .seconds(2))
                 playback.engine.togglePlay()
+            }
+        case "landscapehidden":
+            // En horizontal, reproduciendo y con los controles ya ocultos: no tiene que quedar nada encima
+            UserDefaults.standard.set(false, forKey: "chatOverlay")
+            if let login {
+                playback.play(.live(login))
+                try? await Task.sleep(for: .seconds(8))
+                Orientation.set(landscape: true)
+            }
+        case "events":
+            // Los avisos de encima del chat (raid, fijado, hype train, encuesta, predicción)
+            if let login {
+                playback.play(.live(login))
+                try? await Task.sleep(for: .seconds(10))
+                playback.injectDemoEvents()
             }
         case "mini":
             if let login {

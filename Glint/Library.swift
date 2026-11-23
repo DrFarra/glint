@@ -24,6 +24,17 @@ struct WatchedVideo: Codable, Identifiable {
     var resumePosition: Double? { position > 10 && position < length - 60 ? position : nil }
 }
 
+/// Cofre de puntos reclamado solo (o el intento fallido, con su motivo).
+struct BonusClaim: Codable, Identifiable {
+    var id = UUID()
+    let channel: String
+    let date: Date
+    /// Lo que subió el saldo al reclamar; nil si no se pudo saber.
+    let gained: Int?
+    /// nil si salió bien.
+    let error: String?
+}
+
 extension Twitch.Channel {
     var ref: ChannelRef { ChannelRef(login: login, displayName: name, avatar: profileImageURL) }
 }
@@ -34,6 +45,15 @@ final class Library {
     private(set) var follows: [ChannelRef] = Library.load("follows") { didSet { Library.save(follows, "follows") } }
     private(set) var recents: [ChannelRef] = Library.load("recentSearches") { didSet { Library.save(recents, "recentSearches") } }
     private(set) var watched: [WatchedVideo] = Library.load("watchedVideos") { didSet { Library.save(watched, "watchedVideos") } }
+    private(set) var claims: [BonusClaim] = Library.load("bonusClaims") { didSet { Library.save(claims, "bonusClaims") } }
+
+    /// Lo más reciente primero; se guardan los últimos 200.
+    func recordClaim(_ claim: BonusClaim) {
+        claims.insert(claim, at: 0)
+        if claims.count > 200 { claims.removeLast(claims.count - 200) }
+    }
+
+    func clearClaims() { claims = [] }
 
     func isFollowing(_ login: String) -> Bool { follows.contains { $0.login == login } }
 
@@ -50,10 +70,31 @@ final class Library {
     }
 
     /// Añade los seguidos de la cuenta de Twitch que aún no estén (no quita ninguno).
+    /// Van arriba, como los que sigues desde la app: al final pasaban desapercibidos.
     func importFollows(_ channels: [ChannelRef]) {
         let new = channels.filter { !isFollowing($0.login) }
-        if !new.isEmpty { follows += new }
+        if !new.isEmpty { follows = new + follows }
     }
+
+    /// Trae los seguidos de tu cuenta de Twitch (al abrir la app, al volver a ella y al recargar Inicio).
+    /// En una tarea propia: SwiftUI cancelaba la de recargar a mitad, y la vía web tarda segundos.
+    /// Si ya hay una en marcha, se espera a esa en vez de lanzar otra.
+    func importFollows(token: String) async {
+        let task = importing ?? Task {
+            let (channels, tried) = await Twitch.followedChannels(token: token)
+            importFollows(channels)
+            // Si no llega nada, en Inicio se ve qué pasó con cada forma de pedirlos
+            followsProblem = channels.isEmpty ? "No llegaron tus seguidos de Twitch (\(tried.joined(separator: "; ")))." : nil
+        }
+        importing = task
+        await task.value
+        if importing == task { importing = nil }
+    }
+
+    @ObservationIgnored private var importing: Task<Void, Never>?
+
+    /// Por qué no llegaron los seguidos de la cuenta (se enseña en Inicio).
+    private(set) var followsProblem: String?
 
     func addRecent(_ channel: ChannelRef) {
         recents.removeAll { $0.login == channel.login }

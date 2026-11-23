@@ -44,16 +44,11 @@ struct AccountView: View {
                             }
                         }
                         .padding(.vertical, 4)
-                    }
-                    Section("Con tu cuenta") {
-                        Label("Escribir y responder en el chat", systemImage: "bubble.left.and.text.bubble.right")
-                        Label("Tus emotes de suscripciones", systemImage: "face.smiling")
-                        Label("Tus canales seguidos en Inicio", systemImage: "heart")
-                        Label("Puntos, predicciones y encuestas", systemImage: "star.circle")
-                    }
-                    Section {
-                        Button("Cerrar sesión", role: .destructive) {
-                            Task { await account.signOut() }
+                        NavigationLink { WhispersView() } label: {
+                            Label("Mensajes", systemImage: "bubble.left.and.bubble.right")
+                        }
+                        NavigationLink { DropsView() } label: {
+                            Label("Drops", systemImage: "gift")
                         }
                     }
                 } else {
@@ -65,8 +60,6 @@ struct AccountView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 4)
-                    }
-                    Section {
                         Button {
                             failure = nil
                             showLogin = true
@@ -84,8 +77,17 @@ struct AccountView: View {
                         Section { Text(failure).foregroundStyle(Color.live) }
                     }
                 }
+                // Los ajustes aquí mismo: antes estaban una pantalla más adentro
+                SettingsSections()
+                if account.user != nil {
+                    Section {
+                        Button("Cerrar sesión", role: .destructive) {
+                            Task { await account.signOut() }
+                        }
+                    }
+                }
             }
-            .navigationTitle("Cuenta")
+            .navigationTitle("Ajustes")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } }
@@ -209,6 +211,8 @@ struct ChatComposer: View {
     @State private var showEmotes = false
     @State private var showPoints = false
     @State private var points: Int?
+    /// Desde cuándo sigues el canal (para el modo solo seguidores); nil = no se sabe.
+    @State private var followedAt: Date?? = nil
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -231,7 +235,19 @@ struct ChatComposer: View {
                     .accessibilityLabel("Cancelar respuesta")
                 }
             }
-            if account.isLoggedIn {
+            if account.isLoggedIn, let reason = chat.writeBlock(followedAt: followedAt) {
+                // Sin caja de texto: si no puedes escribir, que no lo parezca
+                HStack(spacing: 8) {
+                    Label(reason, systemImage: "lock.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    pointsButton
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, 4)
+            } else if account.isLoggedIn {
+                if !suggestions.isEmpty { suggestionBar }
                 inputRow
             } else {
                 Button { router.showAccount = true } label: {
@@ -252,15 +268,18 @@ struct ChatComposer: View {
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showPoints, onDismiss: refreshPoints) {
-            if let channel = chat.channel, let url = URL(string: "https://www.twitch.tv/popout/\(channel)/chat?popout=") {
-                TwitchWebSheet(title: "Puntos y predicciones", url: url,
-                               hint: "Chat de Twitch: aquí puedes canjear puntos, apostar en predicciones y votar en encuestas.")
+            if let channel = chat.channel {
+                PointsView(login: channel)
             }
         }
         .task(id: "\(chat.channel ?? "")-\(account.user?.id ?? "")") {
+            followedAt = nil
             guard account.isLoggedIn else { return }
-            await account.loadEmotes()
             refreshPoints()
+            if let token = account.token, let channel = chat.channel {
+                followedAt = await Twitch.followedAt(channel, token: token)
+            }
+            await account.loadEmotes()
         }
         .onChange(of: replyTo?.id) { _, id in if id != nil { focused = true } }
     }
@@ -283,18 +302,13 @@ struct ChatComposer: View {
                     if value.count > 500 { text = String(value.prefix(500)) }
                 }
 
-            if text.isEmpty {
-                Button { showPoints = true } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "star.circle.fill")
-                        if let points { Text(Format.count(points)).monospacedDigit() }
-                    }
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(Color.glint)
-                    .frame(minWidth: 32, minHeight: 36)
+            if text.isEmpty, focused {
+                Button { focused = false } label: {
+                    Image(systemName: "keyboard.chevron.compact.down").font(.title3).frame(width: 32, height: 36)
                 }
-                .accessibilityLabel(points.map { "\(Format.count($0)) puntos del canal. Puntos, predicciones y encuestas" }
-                                    ?? "Puntos, predicciones y encuestas")
+                .accessibilityLabel("Ocultar teclado")
+            } else if text.isEmpty {
+                pointsButton
             } else {
                 Button(action: send) {
                     Image(systemName: "arrow.up.circle.fill").font(.title2).frame(width: 32, height: 36)
@@ -304,6 +318,63 @@ struct ChatComposer: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    /// Lo que se está escribiendo: la última palabra.
+    private var lastWord: Substring { text.split(separator: " ", omittingEmptySubsequences: false).last ?? "" }
+
+    /// Autocompletar como en la app de Twitch: emotes por su nombre y "@" + gente que ha escrito.
+    private var suggestions: [(name: String, url: String?)] {
+        let word = lastWord.lowercased()
+        guard word.count >= 2 else { return [] }
+        if word.hasPrefix("@") {
+            let prefix = word.dropFirst()
+            var seen = Set<String>()
+            return chat.messages.reversed().compactMap { message -> (name: String, url: String?)? in
+                guard !message.login.isEmpty, message.login.hasPrefix(prefix), seen.insert(message.login).inserted else { return nil }
+                return (name: "@\(message.name)", url: nil)
+            }.prefix(8).map { $0 }
+        }
+        let emotes = chat.channelEmotes + account.emoteSets.flatMap { set in set.emotes.map { (name: $0.token, url: $0.url) } }
+        var seen = Set<String>()
+        return emotes.filter { $0.name.lowercased().hasPrefix(word) && seen.insert($0.name).inserted }
+            .prefix(12).map { (name: $0.name, url: Optional($0.url)) }
+    }
+
+    private var suggestionBar: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(Array(suggestions.enumerated()), id: \.offset) { _, suggestion in
+                    Button {
+                        text = String(text.dropLast(lastWord.count)) + suggestion.name + " "
+                    } label: {
+                        HStack(spacing: 5) {
+                            if let url = suggestion.url { EmoteCell(url: url).frame(width: 24, height: 24) }
+                            Text(suggestion.name).font(.footnote.weight(.medium)).lineLimit(1)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.surface, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private var pointsButton: some View {
+        Button { showPoints = true } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "star.circle.fill")
+                if let points { Text(Format.count(points)).monospacedDigit() }
+            }
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(Color.glint)
+            .frame(minWidth: 32, minHeight: 36)
+        }
+        .accessibilityLabel(points.map { "\(Format.count($0)) puntos del canal. Puntos, predicciones y encuestas" }
+                            ?? "Puntos, predicciones y encuestas")
     }
 
     private func send() {
@@ -320,6 +391,24 @@ struct ChatComposer: View {
     private func refreshPoints() {
         guard let token = account.token, let channel = chat.channel else { return }
         Task { points = await Twitch.pointsBalance(channel, token: token) }
+    }
+}
+
+/// Un emote del selector, de la misma caché que el chat: los que ya salieron en el chat aparecen
+/// al instante y los que se bajan aquí ya estarán listos cuando alguien los use.
+private struct EmoteCell: View {
+    let url: String
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFit()
+            } else {
+                RoundedRectangle(cornerRadius: 6).fill(Color.surface)
+            }
+        }
+        .task(id: url) { image = await EmoteImages.shared.loaded(url) }
     }
 }
 
@@ -361,14 +450,10 @@ struct EmotePicker: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 44), spacing: 6)], spacing: 6) {
                 ForEach(Array(emotes.enumerated()), id: \.offset) { _, emote in
                     Button { onPick(emote.name) } label: {
-                        AsyncImage(url: URL(string: emote.url)) { image in
-                            image.resizable().scaledToFit()
-                        } placeholder: {
-                            RoundedRectangle(cornerRadius: 6).fill(Color.surface)
-                        }
-                        .frame(width: 32, height: 32)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
+                        EmoteCell(url: emote.url)
+                            .frame(width: 32, height: 32)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(PressStyle())
                     .accessibilityLabel(emote.name)

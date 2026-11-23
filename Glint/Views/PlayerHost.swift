@@ -11,6 +11,10 @@ struct PlayerHost: View {
     @State private var drag: CGFloat?
     @State private var chatOpen = true
     @State private var cardOffset: CGFloat = 0
+    /// A pantalla completa, el chat va encima del vídeo en vez de en un panel al lado.
+    @AppStorage("chatOverlay") private var chatOverlay = false
+    @AppStorage("chatOverlayTrailing") private var overlayTrailing = false
+    @AppStorage("chatOverlayOpacity") private var overlayOpacity = 1.0
 
     private var progress: CGFloat { drag ?? (playback.minimized ? 1 : 0) }
 
@@ -18,17 +22,33 @@ struct PlayerHost: View {
         if playback.media != nil {
             GeometryReader { geo in
                 let layout = PlayerLayout(size: geo.size, insets: geo.safeAreaInsets, progress: progress,
-                                          chatOpen: chatOpen && hasChat, offset: cardOffset)
+                                          chatOpen: chatBeside, offset: cardOffset)
                 content(layout)
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                     .statusBarHidden(layout.landscape && progress == 0)
                     .persistentSystemOverlays(layout.landscape && progress == 0 ? .hidden : .automatic)
             }
+            // Al cambiar de modo se ve el chat, si no el ajuste parece no hacer nada
+            .onChange(of: chatOverlay) { withAnimation(.snappy) { chatOpen = true } }
             // A pantalla completa el teclado empuja el chat hacia arriba para ver lo que escribes;
             // en mini, la tarjeta no se mueve
             .ignoresSafeArea(playback.minimized || drag != nil ? .keyboard : [])
             .transition(.move(edge: .bottom).combined(with: .opacity))
+            .sheet(item: Binding(get: { playback.clipEditor.map(ClipEditor.init) }, set: { playback.clipEditor = $0?.url })) { editor in
+                TwitchWebSheet(title: "Tu clip", url: editor.url, hint: "Ponle título y publícalo. Lo verás en los clips del canal.")
+            }
+            .alert("No se pudo crear el clip", isPresented: Binding(get: { playback.clipProblem != nil },
+                                                                      set: { if !$0 { playback.clipProblem = nil } })) {
+                Button("Vale", role: .cancel) {}
+            } message: {
+                Text(playback.clipProblem ?? "")
+            }
         }
+    }
+
+    private struct ClipEditor: Identifiable {
+        let url: URL
+        var id: URL { url }
     }
 
     private var viewers: Int? {
@@ -42,6 +62,9 @@ struct PlayerHost: View {
         default: false
         }
     }
+
+    /// Chat en el panel lateral (solo cuenta en horizontal; en vertical va debajo del vídeo).
+    private var chatBeside: Bool { chatOpen && hasChat && !chatOverlay }
 
     @ViewBuilder
     private func content(_ layout: PlayerLayout) -> some View {
@@ -59,7 +82,7 @@ struct PlayerHost: View {
                     .offset(y: layout.full.maxY + layout.progress * 240)
                     .opacity(1 - layout.progress * 2.5)
                     .allowsHitTesting(full)
-            } else if chatOpen, hasChat {
+            } else if chatBeside {
                 ChatView(chat: playback.chat)
                     .padding(.trailing, layout.insets.trailing)
                     .frame(width: PlayerLayout.chatWidth + layout.insets.trailing,
@@ -79,13 +102,29 @@ struct PlayerHost: View {
                     .allowsHitTesting(full)
             }
 
-            miniCard(layout)
+            // Su cristal no respeta la opacidad 0: a pantalla completa no se dibuja
+            if layout.progress > 0 {
+                miniCard(layout)
+            }
 
             VideoSurface(engine: playback.engine)
                 .frame(width: layout.video.width, height: layout.video.height)
                 .clipShape(RoundedRectangle(cornerRadius: 10 * layout.progress, style: .continuous))
                 .offset(x: layout.video.minX, y: layout.video.minY)
                 .allowsHitTesting(false)
+
+            if layout.landscape, chatOverlay, chatOpen, hasChat {
+                let width = min(330, layout.size.width * 0.4)
+                OverlayChat(chat: playback.chat)
+                    // Abajo, en el lado elegido, por encima de la barra de progreso
+                    .frame(width: width, height: layout.size.height * 0.6)
+                    .offset(x: overlayTrailing
+                                ? layout.size.width + layout.insets.trailing - max(layout.insets.trailing, 16) - width
+                                : max(layout.insets.leading, 16) - layout.insets.leading,
+                            y: layout.size.height * 0.4 - max(layout.insets.bottom, 6) - 44)
+                    .opacity(overlayOpacity * (1 - layout.progress * 2.5))
+                    .transition(.opacity)
+            }
 
             PlayerControls(
                 engine: playback.engine,
@@ -97,6 +136,7 @@ struct PlayerHost: View {
                 safe: layout.insets,
                 active: layout.progress < 0.01,
                 chatOpen: chatOpen && hasChat,
+                chatBeside: chatBeside,
                 showsChatToggle: hasChat,
                 onMinimize: { withAnimation(.snappy) { playback.minimized = true } },
                 onFullscreen: { Orientation.set(landscape: !layout.landscape) },
@@ -119,7 +159,10 @@ struct PlayerHost: View {
                             drag = nil
                         }
                     }
-                }
+                },
+                // Clips solo del directo y con tu cuenta, como en la app de Twitch
+                onClip: playback.channel?.stream != nil && Account.shared.token != nil
+                    ? { Task { await playback.createClip() } } : nil
             )
             .frame(width: layout.video.width, height: layout.video.height)
             .offset(x: layout.video.minX, y: layout.video.minY)
@@ -332,11 +375,24 @@ struct PlayerDetails: View {
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
                     .lineLimit(1)
+                if !playback.liveDrops.isEmpty {
+                    // Como en la app de Twitch: aquí ver el directo suma para esos drops
+                    Label("Drops: \(playback.liveDrops.joined(separator: ", "))", systemImage: "gift.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.glint)
+                        .lineLimit(1)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .onTapGesture { withAnimation(.snappy) { expanded.toggle() } }
 
+            if let link = shareURL {
+                ShareLink(item: link) {
+                    Image(systemName: "square.and.arrow.up").font(.body.weight(.semibold)).frame(width: 34, height: 34)
+                }
+                .accessibilityLabel("Compartir")
+            }
             if let ref {
                 FollowButton(channel: ref, compact: true)
             }
@@ -345,9 +401,25 @@ struct PlayerDetails: View {
         .padding(.vertical, 12)
     }
 
+    /// Enlace de lo que se está viendo, para compartir.
+    private var shareURL: URL? {
+        switch playback.media {
+        case .live(let login): URL(string: "https://www.twitch.tv/\(login)")
+        case .video(let id): URL(string: "https://www.twitch.tv/videos/\(id)")
+        case .clip(let slug): URL(string: "https://clips.twitch.tv/\(slug)")
+        case nil: nil
+        }
+    }
+
     private var meta: String {
         if let stream = playback.channel?.stream {
-            return [stream.game?.title, stream.viewersCount.map { "\(Format.count($0)) espectadores" }]
+            // Cuánto lleva en directo, como en la app de Twitch
+            let uptime = stream.createdAt.map { start -> String in
+                let minutes = max(0, Int(-start.timeIntervalSinceNow / 60))
+                return minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) min" : "\(minutes) min"
+            }
+            // El juego al final: es lo que se corta si no cabe
+            return [stream.viewersCount.map { "\(Format.count($0)) espectadores" }, uptime, stream.game?.title]
                 .compactMap { $0 }.joined(separator: " · ")
         }
         if let video = playback.video {
