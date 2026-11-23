@@ -36,6 +36,11 @@ struct ChatMessage: Identifiable {
     /// Id del mensaje en Twitch (para responderlo o borrarlo) y usuario que lo escribió.
     var ircID: String?
     var login = ""
+    /// Insignias tal como llegan ("moderator/1") y su imagen, cuando ya se conoce.
+    var badges: [String] = []
+    var badgeURLs: [String] = []
+    /// Cuándo llegó (para la hora junto al mensaje).
+    let date = Date()
     /// Cuándo entró en el chat a su ritmo normal (nil si llegó de golpe: al saltar o al soltar los
     /// retenidos). Solo esos se animan al aparecer.
     var shownAt: Date?
@@ -56,8 +61,9 @@ struct ChatMessage: Identifiable {
         }
     }
 
+    /// Imágenes que hacen falta antes de enseñarlo: emotes e insignias.
     var emoteURLs: [String] {
-        parts.compactMap { part in
+        badgeURLs + parts.compactMap { part in
             if case .emote(let url, _) = part { return url }
             return nil
         }
@@ -108,6 +114,9 @@ final class ChatClient {
     /// Emotes de 7TV, BTTV y FFZ del canal: nombre → URL.
     @ObservationIgnored private var extraEmotes: [String: String] = [:]
     @ObservationIgnored private var emoteTask: Task<Void, Never>?
+    @ObservationIgnored private var badgeTask: Task<Void, Never>?
+    /// Imagen de cada insignia ("subscriber/12" → URL), globales y del canal.
+    @ObservationIgnored private var badgeImages: [String: String] = [:]
     /// Lista de emotes de 7TV/BTTV/FFZ ya descargada. Hasta entonces los mensajes del
     /// directo esperan en `waiting`: si no, se quedarían con el emote como texto.
     @ObservationIgnored private var emotesLoaded = false
@@ -115,6 +124,18 @@ final class ChatClient {
 
     func loadEmotes(channelID: String?) {
         emoteTask?.cancel()
+        badgeTask?.cancel()
+        badgeTask = Task { [weak self] in
+            let badges = await Twitch.badges(channelID: channelID)
+            guard !Task.isCancelled, let self else { return }
+            badgeImages = badges
+            // Los mensajes que ya llegaron también se ponen sus insignias
+            messages = messages.map(expand)
+            held = held.map(expand)
+            ready = ready.map(expand)
+            staged = staged.map { (message: expand($0.message), arrived: $0.arrived) }
+            for message in messages + held { EmoteImages.shared.prefetch(message.emoteURLs) }
+        }
         // La lista guardada de la última vez sirve al instante; la de 7TV de un canal grande
         // tarda varios segundos en llegar
         if let cached = ThirdPartyEmotes.cached(channelID: channelID) { apply(cached) }
@@ -568,6 +589,11 @@ final class ChatClient {
         var message = ChatMessage(name: comment.commenter?.name ?? "?",
                                   color: Self.color(comment.message?.userColor.map { Substring($0) }, name: login),
                                   parts: Self.annotate(parts), isAction: false)
+        message.login = login
+        message.badges = (comment.message?.userBadges ?? []).compactMap { badge in
+            guard let set = badge.setID, !set.isEmpty, let version = badge.version else { return nil }
+            return "\(set)/\(version)"
+        }
         // En los VOD Twitch guarda las suscripciones como texto normal: se reconocen por la frase
         let plain = (comment.message?.fragments ?? []).compactMap(\.text).joined()
         if plain.contains(" subscribed at Tier ") || plain.contains(" subscribed with Prime") {
@@ -580,8 +606,10 @@ final class ChatClient {
         return expand(message)
     }
 
-    /// Cambia las palabras que son emotes de 7TV/BTTV/FFZ por su imagen.
+    /// Pone la imagen de sus insignias y cambia las palabras que son emotes de 7TV/BTTV/FFZ por su imagen.
     private func expand(_ message: ChatMessage) -> ChatMessage {
+        var message = message
+        message.badgeURLs = message.badges.compactMap { badgeImages[$0] }
         guard !extraEmotes.isEmpty else { return message }
         var parts: [ChatMessage.Part] = []
         var changed = false
@@ -661,6 +689,7 @@ final class ChatClient {
                                   isAction: isAction)
         message.ircID = tags["id"].map(String.init)
         message.login = login
+        message.badges = (tags["badges"] ?? "").split(separator: ",").map(String.init)
         let msgID = tags["msg-id"].map(String.init) ?? ""
         if isNotice {
             // Una suscripción múltiple llega también regalo a regalo: basta con el aviso general
@@ -854,11 +883,13 @@ final class EmoteImages {
             return
         }
         // Decodificar fuera del hilo principal: un emote animado tiene decenas de fotogramas
-        let frames = await Task.detached(priority: .userInitiated) { Self.decode(data) }.value
+        // Las insignias, algo más bajas que la línea, como en la app de Twitch
+        let height = link.contains("/badges/v1/") ? Self.badgeHeight : Self.lineHeight
+        let frames = await Task.detached(priority: .userInitiated) { Self.decode(data, height: height) }.value
         if let frames { cache[link] = frames } else { failed.insert(link) }
     }
 
-    nonisolated private static func decode(_ data: Data) -> Frames? {
+    nonisolated private static func decode(_ data: Data, height lineHeight: CGFloat) -> Frames? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let count = CGImageSourceGetCount(source)
         guard count > 0 else { return nil }
@@ -867,7 +898,7 @@ final class EmoteImages {
         // tamaño: antes cada uno salía a su tamaño original (los pequeños se veían pixelados
         // o más chicos, y si un fotograma medía distinto el emote saltaba o pisaba el texto)
         let canvas = canvasSize(source) ?? CGSize(width: first.width, height: first.height)
-        let size = CGSize(width: (Self.lineHeight * canvas.width / canvas.height).rounded(), height: Self.lineHeight)
+        let size = CGSize(width: (lineHeight * canvas.width / canvas.height).rounded(), height: lineHeight)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 3
         format.opaque = false
@@ -889,6 +920,7 @@ final class EmoteImages {
     }
 
     nonisolated private static let lineHeight: CGFloat = 22
+    nonisolated private static let badgeHeight: CGFloat = 18
 
     /// Tamaño de la animación entera (puede ser mayor que el de un fotograma suelto).
     nonisolated private static func canvasSize(_ source: CGImageSource) -> CGSize? {

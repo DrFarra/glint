@@ -7,6 +7,7 @@ struct SettingsSections: View {
     @AppStorage("levelGestures") private var levelGestures = true
     @AppStorage("chatTextSize") private var chatTextSize = ChatTextSize.normal
     @AppStorage("chatAnimation") private var chatAnimation = true
+    @AppStorage("chatTimestamps") private var chatTimestamps = false
     @AppStorage("chatOverlay") private var chatOverlay = false
     @AppStorage("chatOverlayTrailing") private var overlayTrailing = false
     @AppStorage("chatOverlayOpacity") private var overlayOpacity = 1.0
@@ -43,6 +44,7 @@ struct SettingsSections: View {
                 ForEach(ChatTextSize.allCases, id: \.self) { Text($0.label).tag($0) }
             }
             Toggle("Animar los mensajes nuevos", isOn: $chatAnimation)
+            Toggle("Hora en los mensajes", isOn: $chatTimestamps)
             Toggle("Sobre el vídeo a pantalla completa", isOn: $chatOverlay.animation(.snappy))
             if chatOverlay {
                 Picker("Lado", selection: $overlayTrailing) {

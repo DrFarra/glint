@@ -21,6 +21,9 @@ final class Playback {
     private(set) var problem: String?
     /// Campañas de drops activas en el directo que se está viendo.
     private(set) var liveDrops: [String] = []
+    /// Encima del chat del directo: el mensaje fijado y la predicción en curso.
+    private(set) var pinnedMessage: String?
+    private(set) var prediction: Twitch.Prediction?
     let engine = PlayerEngine()
     let chat = ChatClient()
     /// Para el historial de vídeos vistos; lo asigna la vista raíz.
@@ -81,6 +84,8 @@ final class Playback {
         clip = nil
         moreVideos = []
         liveDrops = []
+        pinnedMessage = nil
+        prediction = nil
     }
 
     private func saveProgress() {
@@ -163,6 +168,7 @@ final class Playback {
                 }
                 engine.startLive(login: login, startedAt: stream.createdAt, archiveID: stream.archiveVideo?.id)
                 liveDrops = await Twitch.channelDrops(login)
+                (pinnedMessage, prediction) = await Twitch.chatExtras(login)
                 // Espectadores, título y categoría al día
                 while !Task.isCancelled {
                     try await Task.sleep(for: .seconds(60))
@@ -170,6 +176,7 @@ final class Playback {
                         self.channel = fresh
                         engine.updateArchive(fresh.stream?.archiveVideo?.id)
                     }
+                    (pinnedMessage, prediction) = await Twitch.chatExtras(login)
                     await watchAndClaim(login)
                 }
             case .video(let id):

@@ -105,7 +105,10 @@ enum Twitch {
         struct Body: Decodable {
             let userColor: String?
             let fragments: [Fragment]?
+            let userBadges: [Badge]?
         }
+
+        struct Badge: Decodable { let setID: String?; let version: String? }
 
         struct Fragment: Decodable {
             let text: String?
@@ -311,7 +314,7 @@ enum Twitch {
         let r: R = try await query("""
             query($id: ID!, $t: Int) { video(id: $id) { comments(contentOffsetSeconds: $t) { edges { node { \
             id contentOffsetSeconds commenter { login displayName } \
-            message { userColor fragments { text emote { emoteID } } } } } pageInfo { hasNextPage } } } }
+            message { userColor userBadges { setID version } fragments { text emote { emoteID } } } } } pageInfo { hasNextPage } } } }
             """, ["id": id, "t": offset])
         let comments = r.video?.comments
         return (comments?.edges?.compactMap(\.node) ?? [], comments?.pageInfo?.hasNextPage ?? false)
@@ -523,6 +526,75 @@ enum Twitch {
             after = cursor
         }
         return out
+    }
+
+    // MARK: - Chat: insignias, fijado, predicciones y fichas de usuario
+
+    /// Imagen de cada insignia ("moderator/1" → URL): las globales y, encima, las del canal.
+    static func badges(channelID: String?) async -> [String: String] {
+        struct Badge: Decodable { let setID: String?; let version: String?; let imageURL: String? }
+        struct U: Decodable { let broadcastBadges: [Badge]? }
+        struct R: Decodable { let badges: [Badge]?; let user: U? }
+        let fields = "setID version imageURL(size: DOUBLE)"
+        let channel = channelID.map { "user(id: \"\($0)\") { broadcastBadges { \(fields) } }" } ?? ""
+        guard let r: R = try? await query("query { badges { \(fields) } \(channel) }") else { return [:] }
+        var out: [String: String] = [:]
+        for badge in (r.badges ?? []) + (r.user?.broadcastBadges ?? []) {
+            if let set = badge.setID, let version = badge.version, let url = badge.imageURL { out["\(set)/\(version)"] = url }
+        }
+        return out
+    }
+
+    /// Predicción activa en el canal (como la tarjeta de la app de Twitch).
+    struct Prediction: Equatable {
+        struct Outcome: Equatable { let title: String; let points: Int }
+        let title: String
+        let locked: Bool
+        let outcomes: [Outcome]
+    }
+
+    /// Lo que va encima del chat del directo: el mensaje fijado y la predicción en curso.
+    static func chatExtras(_ login: String) async -> (pinned: String?, prediction: Prediction?) {
+        struct Sender: Decodable { let displayName: String? }
+        struct Content: Decodable { let text: String? }
+        struct Pinned: Decodable { let content: Content?; let sender: Sender? }
+        struct Node: Decodable { let pinnedMessage: Pinned? }
+        struct Edge: Decodable { let node: Node? }
+        struct Pins: Decodable { let edges: [Edge]? }
+        struct Outcome: Decodable { let title: String?; let totalPoints: Int? }
+        struct Event: Decodable { let title: String?; let status: String?; let outcomes: [Outcome]? }
+        struct C: Decodable { let pinnedChatMessages: Pins?; let activePredictionEvents: [Event]? }
+        struct R: Decodable { let channel: C? }
+        guard let r: R = try? await query("""
+            query($login: String!) { channel(name: $login) { \
+            pinnedChatMessages(first: 1) { edges { node { pinnedMessage { content { text } sender { displayName } } } } } \
+            activePredictionEvents { title status outcomes { title totalPoints } } } }
+            """, ["login": login]) else { return (nil, nil) }
+        let pin = r.channel?.pinnedChatMessages?.edges?.first?.node?.pinnedMessage
+        let pinned = pin?.content?.text.map { text in pin?.sender?.displayName.map { "\($0): \(text)" } ?? text }
+        let prediction = r.channel?.activePredictionEvents?.first.map { event in
+            Prediction(title: event.title ?? "Predicción", locked: event.status == "LOCKED",
+                       outcomes: (event.outcomes ?? []).map { .init(title: $0.title ?? "", points: $0.totalPoints ?? 0) })
+        }
+        return (pinned, prediction)
+    }
+
+    /// Datos públicos de un usuario del chat (su ficha).
+    struct UserCard: Decodable {
+        let displayName: String?
+        let createdAt: Date?
+        let profileImageURL: String?
+        let followers: Count?
+        let description: String?
+    }
+
+    static func userCard(_ login: String) async -> UserCard? {
+        struct R: Decodable { let user: UserCard? }
+        let r: R? = try? await query("""
+            query($login: String!) { user(login: $login) { displayName createdAt description \
+            profileImageURL(width: 150) followers { totalCount } } }
+            """, ["login": login])
+        return r?.user
     }
 
     // MARK: - Drops

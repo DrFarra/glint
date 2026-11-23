@@ -14,9 +14,30 @@ struct ChatView: View {
     @State private var replyTo: ChatMessage?
     @AppStorage("chatTextSize") private var textSize = ChatTextSize.normal
     @AppStorage("chatAnimation") private var animate = true
+    @AppStorage("chatTimestamps") private var timestamps = false
+    @Environment(Playback.self) private var playback
+    /// Ficha del usuario que se está mirando (su login).
+    @State private var profile: String?
+    @State private var showPrediction = false
 
     var body: some View {
         VStack(spacing: 0) {
+            // Como en la app de Twitch: arriba el mensaje fijado y la predicción en curso
+            if chat.channel != nil {
+                if let pinned = playback.pinnedMessage {
+                    Label(pinned, systemImage: "pin.fill")
+                        .font(.footnote)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Color.white.opacity(0.06))
+                }
+                if let prediction = playback.prediction {
+                    Button { showPrediction = true } label: { PredictionBanner(prediction: prediction) }
+                        .buttonStyle(.plain)
+                }
+            }
             list.chatTextSize(textSize)
             // Solo en directo se puede escribir; en un VOD el chat es la repetición
             if chat.channel != nil {
@@ -29,7 +50,8 @@ struct ChatView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 6) {
                 ForEach(chat.messages.reversed()) { message in
-                    ChatRow(message: message, onReply: chat.authenticated ? { replyTo = $0 } : nil)
+                    ChatRow(message: message, onReply: chat.authenticated ? { replyTo = $0 } : nil,
+                            onProfile: { profile = $0 }, showTime: timestamps && chat.channel != nil)
                         .modifier(ChatArrival(shownAt: message.shownAt, enabled: animate))
                         .scaleEffect(x: 1, y: -1)
                 }
@@ -84,6 +106,15 @@ struct ChatView: View {
             }
         }
         .animation(.snappy, value: chat.paused && (!atNewest || chat.pendingCount > 0))
+        .sheet(item: Binding(get: { profile.map(UserLogin.init) }, set: { profile = $0?.id })) { user in
+            UserCardView(login: user.id, messages: chat.messages.filter { $0.login == user.id })
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showPrediction) {
+            if let login = playback.login, let url = URL(string: "https://www.twitch.tv/popout/\(login)/chat?popout=") {
+                TwitchWebSheet(title: "Predicción", url: url, hint: "Toca la predicción de arriba del chat para elegir y apostar puntos.")
+            }
+        }
         // Al girar el iPhone se cambia de chat (debajo del vídeo ↔ panel lateral):
         // el que aparece arranca siempre siguiendo el último mensaje
         .onAppear { chat.paused = false }
@@ -167,9 +198,15 @@ struct OverlayChat: View {
     }
 }
 
+/// Para abrir la ficha de un usuario con `.sheet(item:)`.
+struct UserLogin: Identifiable { let id: String }
+
 struct ChatRow: View {
     let message: ChatMessage
     var onReply: ((ChatMessage) -> Void)?
+    var onProfile: ((String) -> Void)?
+    /// Hora a la izquierda (ajuste del chat, solo en directo).
+    var showTime = false
     @Environment(\.openURL) private var openURL
 
     private static let linkColor = Color(red: 0.45, green: 0.72, blue: 1)
@@ -194,6 +231,9 @@ struct ChatRow: View {
                 if let url = message.links.first { openURL(url) }
             }
             .contextMenu {
+                if let onProfile, !message.login.isEmpty {
+                    Button("Ver perfil de \(message.name)", systemImage: "person.crop.circle") { onProfile(message.login) }
+                }
                 if let onReply, message.ircID != nil, !message.name.isEmpty {
                     Button("Responder", systemImage: "arrowshape.turn.up.left") { onReply(message) }
                 }
@@ -260,7 +300,17 @@ struct ChatRow: View {
 
     private func rendered(at time: Date?) -> Text {
         let emotes = EmoteImages.shared
-        var text = Text(verbatim: message.name).bold().foregroundStyle(message.color)
+        var text = Text(verbatim: "")
+        if showTime {
+            text = Text(verbatim: message.date.formatted(date: .omitted, time: .shortened) + " ").font(.caption).foregroundStyle(.tertiary)
+        }
+        // Insignias delante del nombre (mod, VIP, sub…), como en la app de Twitch
+        for url in message.badgeURLs {
+            if let image = emotes.image(url) {
+                text = Text("\(text)\(Text(Image(uiImage: image)).baselineOffset(-3)) ")
+            }
+        }
+        text = Text("\(text)\(Text(verbatim: message.name).bold().foregroundStyle(message.color))")
         text = Text("\(text)\(Text(verbatim: message.isAction ? " " : ": ").foregroundStyle(.secondary))")
         for part in message.parts {
             switch part {
@@ -307,5 +357,83 @@ extension ChatMessage.Event.Style {
         case .other: Color(red: 1, green: 0.85, blue: 0.35)
         case .notice: Color(white: 0.6)
         }
+    }
+}
+
+/// Tarjeta de predicción encima del chat: título y cómo va cada opción.
+struct PredictionBanner: View {
+    let prediction: Twitch.Prediction
+
+    var body: some View {
+        let total = max(1, prediction.outcomes.map(\.points).reduce(0, +))
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(prediction.title, systemImage: "chart.bar.fill").font(.footnote.weight(.semibold)).lineLimit(2)
+                Spacer(minLength: 8)
+                Text(prediction.locked ? "Cerrada" : "Participar").font(.caption.weight(.semibold))
+                    .foregroundStyle(prediction.locked ? Color.secondary : Color.glint)
+            }
+            ForEach(Array(prediction.outcomes.enumerated()), id: \.offset) { _, outcome in
+                HStack(spacing: 8) {
+                    Text(outcome.title).font(.caption).lineLimit(1)
+                    Spacer()
+                    Text("\(Int((Double(outcome.points) / Double(total) * 100).rounded())) % · \(Format.count(outcome.points))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(Color.glint.opacity(0.1))
+    }
+}
+
+/// Ficha de un usuario del chat: quién es, desde cuándo tiene cuenta y lo que ha escrito aquí.
+struct UserCardView: View {
+    let login: String
+    let messages: [ChatMessage]
+    @Environment(Router.self) private var router
+    @Environment(Playback.self) private var playback
+    @Environment(\.dismiss) private var dismiss
+    @State private var card: Twitch.UserCard?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack(spacing: 14) {
+                        Avatar(url: card?.profileImageURL, size: 60)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(card?.displayName ?? login).font(.headline)
+                            if let created = card?.createdAt {
+                                Text("Cuenta creada el \(created.formatted(date: .long, time: .omitted))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            if let followers = card?.followers?.totalCount {
+                                Text("\(Format.count(followers)) seguidores").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    if let bio = card?.description, !bio.isEmpty {
+                        Text(bio).font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Button("Ver canal", systemImage: "person.crop.square") {
+                        dismiss()
+                        playback.minimized = true
+                        router.open(.channel(login))
+                    }
+                }
+                if !messages.isEmpty {
+                    Section("En este chat") {
+                        ForEach(messages.suffix(20).reversed()) { ChatRow(message: $0) }
+                    }
+                }
+            }
+            .navigationTitle(card?.displayName ?? login)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } } }
+        }
+        .task { card = await Twitch.userCard(login) }
     }
 }
