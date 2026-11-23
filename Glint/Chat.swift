@@ -519,7 +519,19 @@ final class ChatClient {
     // MARK: - Ritmo del chat
 
     /// Mensaje del directo recién llegado, todavía sin emotes de 7TV/BTTV/FFZ.
+    /// Usuarios cuyos mensajes no quieres ver (se guarda en el iPhone).
+    static var hidden: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: "hiddenChatters") ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: "hiddenChatters") }
+    }
+
+    func setHidden(_ login: String, _ hide: Bool) {
+        if hide { Self.hidden.insert(login) } else { Self.hidden.remove(login) }
+        if hide { remove { $0.login == login } }
+    }
+
     private func receive(_ message: ChatMessage) {
+        guard !Self.hidden.contains(message.login) else { return }
         var message = message
         if let me = Account.shared.user?.login, message.login != me,
            message.plainText.lowercased().contains("@\(me)") || message.plainText.lowercased().split(separator: " ").contains(Substring(me)) {

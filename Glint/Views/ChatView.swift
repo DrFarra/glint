@@ -118,7 +118,7 @@ struct ChatView: View {
         }
         .animation(.snappy, value: chat.paused && (!atNewest || chat.pendingCount > 0))
         .sheet(item: Binding(get: { profile.map(UserLogin.init) }, set: { profile = $0?.id })) { user in
-            UserCardView(login: user.id, messages: chat.messages.filter { $0.login == user.id })
+            UserCardView(login: user.id, messages: chat.messages.filter { $0.login == user.id }, chat: chat)
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showPrediction) {
@@ -411,6 +411,7 @@ struct PredictionBanner: View {
 struct UserCardView: View {
     let login: String
     let messages: [ChatMessage]
+    let chat: ChatClient
     @Environment(Router.self) private var router
     @Environment(Playback.self) private var playback
     @Environment(\.dismiss) private var dismiss
@@ -440,6 +441,13 @@ struct UserCardView: View {
                         dismiss()
                         playback.minimized = true
                         router.open(.channel(login))
+                    }
+                    // Como "Bloquear" en la app de Twitch, pero solo en este iPhone
+                    let hidden = ChatClient.hidden.contains(login)
+                    Button(hidden ? "Volver a ver sus mensajes" : "Ocultar sus mensajes",
+                           systemImage: hidden ? "eye" : "eye.slash", role: hidden ? nil : .destructive) {
+                        chat.setHidden(login, !hidden)
+                        dismiss()
                     }
                 }
                 if !messages.isEmpty {
