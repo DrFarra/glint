@@ -120,7 +120,8 @@ final class Playback {
             status.append("puntos: \(error.localizedDescription)")
             return
         }
-        status.append("saldo \(points.balance.map(Format.count) ?? "?")")
+        // Exacto, no "3,9 mil": así se ve subir de 10 en 10 y se sabe si Twitch te cuenta como espectador
+        status.append("saldo \(points.balance.map { $0.formatted() } ?? "?")")
         guard let claimID = points.claimID else {
             status.append("sin cofre")
             return
