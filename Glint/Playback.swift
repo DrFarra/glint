@@ -25,6 +25,43 @@ final class Playback {
     private(set) var pinnedMessage: String?
     private(set) var prediction: Twitch.Prediction?
     private(set) var hypeTrain: Twitch.HypeTrain?
+    /// Encuesta en curso (pide sesión) y raid que prepara el canal.
+    private(set) var poll: Twitch.Poll?
+    private(set) var raidTarget: (login: String, name: String, viewers: Int)?
+    @ObservationIgnored private var raidTask: Task<Void, Never>?
+
+    /// Ir ya al canal del raid (botón del aviso).
+    func followRaid() {
+        guard let target = raidTarget?.login else { return }
+        play(.live(target))
+    }
+
+    /// Como la app de Twitch: si el canal hace raid, te vas con él. La cuenta atrás dura poco, así que
+    /// se mira cada 15 s. Cuando el raid desaparece: si el directo acaba enseguida se lanzó (y vas al
+    /// otro canal); si sigue, se canceló.
+    private func watchRaids(_ login: String) {
+        raidTask?.cancel()
+        raidTask = Task { [weak self] in
+            var lastSeen: Date?
+            while !Task.isCancelled {
+                if let raid = await Twitch.raid(login) {
+                    self?.raidTarget = raid
+                    lastSeen = .now
+                } else if let seen = lastSeen, self?.raidTarget != nil {
+                    if let channel = try? await Twitch.channel(login), channel.stream == nil {
+                        self?.chat.notice("Raid: vas con \(self?.raidTarget?.name ?? "el canal").")
+                        self?.followRaid()
+                        return
+                    }
+                    if Date().timeIntervalSince(seen) > 150 {
+                        self?.raidTarget = nil
+                        lastSeen = nil
+                    }
+                }
+                try? await Task.sleep(for: .seconds(15))
+            }
+        }
+    }
     @ObservationIgnored private var lastDropsCheck = Date.distantPast
     /// Editor del clip recién creado (se abre en una hoja) o por qué no se pudo crear.
     var clipEditor: URL?
@@ -104,6 +141,9 @@ final class Playback {
         pinnedMessage = nil
         prediction = nil
         hypeTrain = nil
+        poll = nil
+        raidTarget = nil
+        raidTask?.cancel()
     }
 
     private func saveProgress() {
@@ -203,6 +243,7 @@ final class Playback {
                     return
                 }
                 engine.startLive(login: login, startedAt: stream.createdAt, archiveID: stream.archiveVideo?.id)
+                watchRaids(login)
                 liveDrops = await Twitch.channelDrops(login)
                 (pinnedMessage, prediction, hypeTrain) = await Twitch.chatExtras(login)
                 // Espectadores, título y categoría al día
@@ -213,6 +254,7 @@ final class Playback {
                         engine.updateArchive(fresh.stream?.archiveVideo?.id)
                     }
                     (pinnedMessage, prediction, hypeTrain) = await Twitch.chatExtras(login)
+                    if let token = Account.shared.token { poll = await Twitch.activePoll(login, token: token) }
                     await watchAndClaim(login)
                     await claimDrops()
                 }

@@ -10,6 +10,8 @@ struct ChannelView: View {
     @State private var panels: [Twitch.Panel] = []
     @State private var schedule: [Twitch.ScheduleSegment] = []
     @Environment(\.openURL) private var openURL
+    @Environment(Account.self) private var account
+    @State private var showSubscribe = false
 
     var body: some View {
         ScrollView {
@@ -119,7 +121,20 @@ struct ChannelView: View {
                     }
                 }
                 Spacer()
+                // Suscribirse o regalar subs: el pago lo hace la web de Twitch, como en su navegador
+                if account.isLoggedIn {
+                    Button { showSubscribe = true } label: {
+                        Image(systemName: "star").font(.body.weight(.semibold)).frame(width: 36, height: 36)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Suscribirse")
+                }
                 FollowButton(channel: channel.ref)
+            }
+            .sheet(isPresented: $showSubscribe) {
+                if let url = URL(string: "https://www.twitch.tv/subs/\(channel.login)") {
+                    TwitchWebSheet(title: "Suscribirse", url: url, hint: "Suscripción, regalos de subs y pago, en la web de Twitch.")
+                }
             }
             .padding(.horizontal, 16)
 

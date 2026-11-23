@@ -33,6 +33,26 @@ struct ChatView: View {
                         .padding(.vertical, 8)
                         .background(Color.white.opacity(0.06))
                 }
+                if let raid = playback.raidTarget {
+                    HStack(spacing: 10) {
+                        Label("Raid a \(raid.name) · \(Format.count(raid.viewers)) espectadores", systemImage: "person.3.fill")
+                            .font(.footnote.weight(.semibold))
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        Button("Ir") { playback.followRaid() }
+                            .font(.footnote.weight(.semibold))
+                            .buttonStyle(.borderedProminent)
+                            .tint(Color(red: 1, green: 0.62, blue: 0.25))
+                            .foregroundStyle(.black)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(Color(red: 1, green: 0.62, blue: 0.25).opacity(0.14))
+                }
+                if let poll = playback.poll {
+                    Button { showPrediction = true } label: { PollBanner(poll: poll) }
+                        .buttonStyle(.plain)
+                }
                 if let train = playback.hypeTrain {
                     HStack(spacing: 10) {
                         Label("Hype train · nivel \(train.level)", systemImage: "train.side.front.car")
@@ -123,7 +143,7 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showPrediction) {
             if let login = playback.login, let url = URL(string: "https://www.twitch.tv/popout/\(login)/chat?popout=") {
-                TwitchWebSheet(title: "Predicción", url: url, hint: "Toca la predicción de arriba del chat para elegir y apostar puntos.")
+                TwitchWebSheet(title: "Votar", url: url, hint: "Toca la predicción o la encuesta de arriba del chat para votar.")
             }
         }
         // Al girar el iPhone se cambia de chat (debajo del vídeo ↔ panel lateral):
@@ -461,5 +481,33 @@ struct UserCardView: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } } }
         }
         .task { card = await Twitch.userCard(login) }
+    }
+}
+
+/// Tarjeta de encuesta encima del chat: la pregunta y cómo van los votos.
+struct PollBanner: View {
+    let poll: Twitch.Poll
+
+    var body: some View {
+        let total = max(1, poll.choices.map(\.votes).reduce(0, +))
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(poll.title, systemImage: "checklist").font(.footnote.weight(.semibold)).lineLimit(2)
+                Spacer(minLength: 8)
+                Text("Votar").font(.caption.weight(.semibold)).foregroundStyle(Color.glint)
+            }
+            ForEach(Array(poll.choices.enumerated()), id: \.offset) { _, choice in
+                HStack(spacing: 8) {
+                    Text(choice.title).font(.caption).lineLimit(1)
+                    Spacer()
+                    Text("\(Int((Double(choice.votes) / Double(total) * 100).rounded())) % · \(Format.count(choice.votes))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(Color(red: 0.45, green: 0.68, blue: 1).opacity(0.1))
     }
 }

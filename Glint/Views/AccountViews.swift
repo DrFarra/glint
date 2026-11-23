@@ -44,6 +44,9 @@ struct AccountView: View {
                             }
                         }
                         .padding(.vertical, 4)
+                        NavigationLink { WhispersView() } label: {
+                            Label("Mensajes", systemImage: "bubble.left.and.bubble.right")
+                        }
                         NavigationLink { DropsView() } label: {
                             Label("Drops", systemImage: "gift")
                         }

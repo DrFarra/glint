@@ -14,6 +14,8 @@ struct PointsView: View {
     @State private var working: String?
     @State private var notice: String?
     @State private var showWeb = false
+    @State private var bits: Int?
+    @State private var showBits = false
 
     var body: some View {
         NavigationStack {
@@ -37,6 +39,16 @@ struct PointsView: View {
                     } else {
                         ProgressView().frame(maxWidth: .infinity).padding(.top, 60)
                     }
+
+                    // Bits: se usan escribiendo "Cheer100" en el chat; se compran en la web de Twitch
+                    Button { showBits = true } label: {
+                        Label(bits.map { "Tus bits: \($0.formatted()) · Conseguir más" } ?? "Conseguir bits", systemImage: "diamond.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(Color(red: 0.72, green: 0.52, blue: 1))
 
                     Button { showWeb = true } label: {
                         Label("Predicciones y encuestas", systemImage: "chart.bar.xaxis")
@@ -87,6 +99,12 @@ struct PointsView: View {
             }
         }
         .task { await load() }
+        .task { if let token = account.token { bits = await Twitch.bitsBalance(token: token) } }
+        .sheet(isPresented: $showBits) {
+            if let url = URL(string: "https://www.twitch.tv/bits-checkout/select") {
+                TwitchWebSheet(title: "Bits", url: url, hint: "Para usarlos, escribe en el chat Cheer seguido de la cantidad (Cheer100).")
+            }
+        }
     }
 
     private func header(_ points: Twitch.Points) -> some View {

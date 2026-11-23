@@ -664,6 +664,105 @@ enum Twitch {
         return url
     }
 
+    // MARK: - Raids, encuestas, mensajes privados y bits
+
+    /// Raid que está preparando el canal (a quién y con cuánta gente). Público.
+    static func raid(_ login: String) async -> (login: String, name: String, viewers: Int)? {
+        struct Target: Decodable { let login: String; let displayName: String? }
+        struct Raid: Decodable { let viewerCount: Int?; let targetChannel: Target? }
+        struct U: Decodable { let raid: Raid? }
+        struct R: Decodable { let user: U? }
+        guard let r: R = try? await query("query($login: String!) { user(login: $login) { raid { viewerCount targetChannel { login displayName } } } }",
+                                          ["login": login]),
+              let raid = r.user?.raid, let target = raid.targetChannel else { return nil }
+        return (target.login, target.displayName ?? target.login, raid.viewerCount ?? 0)
+    }
+
+    /// Encuesta en curso en el canal (pide sesión).
+    struct Poll: Equatable {
+        struct Choice: Equatable { let title: String; let votes: Int }
+        let title: String
+        let choices: [Choice]
+    }
+
+    static func activePoll(_ login: String, token: String) async -> Poll? {
+        struct Votes: Decodable { let total: Int? }
+        struct Choice: Decodable { let title: String?; let votes: Votes? }
+        struct Node: Decodable { let title: String?; let choices: [Choice]? }
+        struct Edge: Decodable { let node: Node? }
+        struct Polls: Decodable { let edges: [Edge]? }
+        struct U: Decodable { let polls: Polls? }
+        struct R: Decodable { let user: U? }
+        guard let r: R = try? await query("""
+            query($login: String!) { user(login: $login) { polls(first: 1, status: ACTIVE) { edges { node { \
+            title choices { title votes { total } } } } } } }
+            """, ["login": login], token: token),
+              let poll = r.user?.polls?.edges?.first?.node else { return nil }
+        return Poll(title: poll.title ?? "Encuesta",
+                    choices: (poll.choices ?? []).map { .init(title: $0.title ?? "", votes: $0.votes?.total ?? 0) })
+    }
+
+    /// Conversación de mensajes privados (whispers).
+    struct WhisperThread: Decodable, Identifiable {
+        let id: String
+        let unreadMessagesCount: Int?
+        let participants: [Participant]?
+        let messages: Messages?
+
+        struct Participant: Decodable { let id: String?; let login: String?; let displayName: String?; let profileImageURL: String? }
+        struct Messages: Decodable { let edges: [Edge]? }
+        struct Edge: Decodable { let node: Message? }
+        struct Message: Decodable, Identifiable {
+            let id: String?
+            let content: Content?
+            let from: Participant?
+            let sentAt: Date?
+            struct Content: Decodable { let content: String? }
+        }
+        /// La otra persona de la conversación.
+        func other(than me: String?) -> Participant? { participants?.first { $0.login != me } ?? participants?.first }
+    }
+
+    static func whisperThreads(token: String) async throws -> [WhisperThread] {
+        struct Edge: Decodable { let node: WhisperThread? }
+        struct Threads: Decodable { let edges: [Edge]? }
+        struct U: Decodable { let whisperThreads: Threads? }
+        struct R: Decodable { let currentUser: U? }
+        let r: R = try await query("""
+            query { currentUser { whisperThreads(first: 30) { edges { node { id unreadMessagesCount \
+            participants { id login displayName profileImageURL(width: 70) } \
+            messages(first: 1) { edges { node { id content { content } from { id login displayName } sentAt } } } } } } } }
+            """, token: token)
+        return r.currentUser?.whisperThreads?.edges?.compactMap(\.node) ?? []
+    }
+
+    /// Mensajes de una conversación, del más antiguo al más nuevo.
+    static func whispers(thread id: String, token: String) async throws -> [WhisperThread.Message] {
+        struct T: Decodable { let messages: WhisperThread.Messages? }
+        struct R: Decodable { let whisperThread: T? }
+        let r: R = try await query("""
+            query($id: ID!) { whisperThread(id: $id) { messages(first: 50) { edges { node { \
+            id content { content } from { id login displayName } sentAt } } } } }
+            """, ["id": id], token: token)
+        return (r.whisperThread?.messages?.edges?.compactMap(\.node) ?? []).sorted { ($0.sentAt ?? .distantPast) < ($1.sentAt ?? .distantPast) }
+    }
+
+    /// Enviar un mensaje privado. Twitch lo protege con su antibots: va por la web invisible.
+    @MainActor
+    static func sendWhisper(_ text: String, to userID: String, token: String) async throws {
+        _ = try await TwitchBridge.mutate("""
+            mutation($input: SendWhisperInput!) { sendWhisper(input: $input) { message { id } } }
+            """, ["input": ["message": text, "nonce": UUID().uuidString, "recipientUserID": userID]], token: token)
+    }
+
+    /// Tus bits (nil si Twitch no lo dice).
+    static func bitsBalance(token: String) async -> Int? {
+        struct U: Decodable { let bitsBalance: Int? }
+        struct R: Decodable { let currentUser: U? }
+        let r: R? = try? await query("query { currentUser { bitsBalance } }", token: token)
+        return r?.currentUser?.bitsBalance
+    }
+
     // MARK: - Drops
 
     /// Campaña de drops en curso en tu inventario, como la devuelve Twitch (la API o su web).
